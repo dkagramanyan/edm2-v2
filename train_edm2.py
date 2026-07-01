@@ -23,6 +23,9 @@ warnings.filterwarnings('ignore', 'You are using `torch.load` with `weights_only
 # Configuration presets.
 
 config_presets = {
+    'edm2-img256-xs':   dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=128, lr=0.0120, decay=70000, dropout=0.00, P_mean=-0.4, P_std=1.0),
+    'edm2-img256-s':    dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=192, lr=0.0100, decay=70000, dropout=0.00, P_mean=-0.4, P_std=1.0),
+    'edm2-img256-m':    dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=256, lr=0.0090, decay=70000, dropout=0.10, P_mean=-0.4, P_std=1.0),
     'edm2-img512-xxs':  dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=64,  lr=0.0170, decay=70000, dropout=0.00, P_mean=-0.4, P_std=1.0),
     'edm2-img512-xs':   dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=128, lr=0.0120, decay=70000, dropout=0.00, P_mean=-0.4, P_std=1.0),
     'edm2-img512-s':    dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=192, lr=0.0100, decay=70000, dropout=0.00, P_mean=-0.4, P_std=1.0),
@@ -35,6 +38,8 @@ config_presets = {
     'edm2-img64-m':     dnnlib.EasyDict(duration=2048<<20, batch=2048, channels=256, lr=0.0090, decay=35000, dropout=0.10, P_mean=-0.8, P_std=1.6),
     'edm2-img64-l':     dnnlib.EasyDict(duration=1024<<20, batch=2048, channels=320, lr=0.0080, decay=35000, dropout=0.10, P_mean=-0.8, P_std=1.6),
     'edm2-img64-xl':    dnnlib.EasyDict(duration=640<<20,  batch=2048, channels=384, lr=0.0070, decay=35000, dropout=0.10, P_mean=-0.8, P_std=1.6),
+    'edm2-img1024-s':   dnnlib.EasyDict(duration=1024<<20, batch=1024, channels=192, lr=0.0080, decay=70000, dropout=0.10, P_mean=-0.4, P_std=1.0),
+    'edm2-img1024-m':   dnnlib.EasyDict(duration=1024<<20, batch=1024, channels=256, lr=0.0070, decay=70000, dropout=0.10, P_mean=-0.4, P_std=1.0),
 }
 
 #----------------------------------------------------------------------------
@@ -87,6 +92,14 @@ def setup_training_config(preset='edm2-img512-s', **opts):
     c.snapshot_nimg = opts.get('snapshot', 0) or None
     c.checkpoint_nimg = opts.get('checkpoint', 0) or None
     c.seed = opts.get('seed', 0)
+
+    # Inline evaluation (combra metrics + eval-time sampler), DiffiT-v2 style.
+    c.combra_metrics = opts.get('combra_metrics', True)
+    c.num_fid_samples = opts.get('num_fid_samples', 10000)
+    c.combra_ref_count = opts.get('combra_ref_count', 0) or None
+    c.eval_sampler = opts.get('sampler', 'edm')
+    c.eval_num_steps = opts.get('sampling_steps', 32)
+    c.eval_guidance = opts.get('guidance', 1.0)
     return c
 
 #----------------------------------------------------------------------------
@@ -170,7 +183,15 @@ def parse_nimg(s):
 @click.option('--seed',             help='Random seed', metavar='INT',                          type=int, default=0, show_default=True)
 @click.option('-n', '--dry-run',    help='Print training options and exit',                     is_flag=True)
 
-def cmdline(outdir, dry_run, **opts):
+# Inline evaluation options (combra metrics + eval-time sampler), DiffiT-v2 style.
+@click.option('--combra-metrics/--no-combra-metrics', 'combra_metrics', help='Compute combra generative-quality metrics each snapshot tick', default=True, show_default=True)
+@click.option('--num-fid-samples',  help='Fakes generated (all ranks) per combra eval; 0=disable', metavar='INT', type=int, default=10000, show_default=True)
+@click.option('--combra-ref-count', help='Real reference images for combra; 0=whole dataset', metavar='INT', type=int, default=0, show_default=True)
+@click.option('--sampler',          help='Eval-time / snapshot sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='edm', show_default=True)
+@click.option('--sampling-steps',   help='Eval-time sampling steps', metavar='INT',             type=click.IntRange(min=1), default=32, show_default=True)
+@click.option('--guidance',         help='Eval-time classifier-free guidance strength', metavar='FLOAT', type=float, default=1.0, show_default=True)
+
+def main(outdir, dry_run, **opts):
     """Train diffusion models according to the EDM2 recipe from the paper
     "Analyzing and Improving the Training Dynamics of Diffusion Models".
 
@@ -200,6 +221,6 @@ def cmdline(outdir, dry_run, **opts):
 #----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cmdline()
+    main()
 
 #----------------------------------------------------------------------------

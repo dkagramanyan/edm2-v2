@@ -8,17 +8,22 @@
 """Main training loop."""
 
 import os
+import json
 import time
 import copy
 import pickle
 import psutil
 import numpy as np
 import torch
+import PIL.Image
 import dnnlib
 from torch_utils import distributed as dist
 from torch_utils import training_stats
 from torch_utils import persistence
 from torch_utils import misc
+from training import logger as tblog
+from training import metrics as combra_mod
+from training import samplers
 
 #----------------------------------------------------------------------------
 # Uncertainty-based loss function (Equations 14,15,16,21) proposed in the
@@ -53,6 +58,44 @@ def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3
     return lr
 
 #----------------------------------------------------------------------------
+# Helpers for DiffiT-style snapshot image grids and picking the EMA network used
+# for eval-time generation. Inference-only -- never touches the update path.
+
+def _primary_ema_net(ema, net):
+    if ema is None:
+        return net
+    got = ema.get()
+    return got[0][0] if isinstance(got, list) else got
+
+def save_image_grid(images_nchw_uint8, fname, grid_size):
+    # images_nchw_uint8: torch.uint8 [N, C, H, W]. Saves a gw x gh PNG grid.
+    gw, gh = grid_size
+    img = images_nchw_uint8.cpu().numpy()
+    n, c, h, w = img.shape
+    n = min(n, gw * gh)
+    img = img[:n]
+    canvas = np.zeros([c, gh * h, gw * w], dtype=np.uint8)
+    for idx in range(n):
+        y, x = (idx // gw) * h, (idx % gw) * w
+        canvas[:, y:y + h, x:x + w] = img[idx]
+    canvas = np.transpose(canvas, (1, 2, 0))
+    PIL.Image.fromarray(canvas[:, :, 0] if c == 1 else canvas, {1: 'L', 3: 'RGB'}[c]).save(fname)
+
+@torch.inference_mode()
+def _generate_grid(eval_net, encoder, gnet, device, *, sampler, num_steps, guidance, seed, n):
+    eval_net.eval()
+    g = torch.Generator(device=device).manual_seed(int(seed))
+    noise = torch.randn(n, eval_net.img_channels, eval_net.img_resolution, eval_net.img_resolution,
+                        device=device, generator=g)
+    labels = None
+    if eval_net.label_dim > 0:
+        idx = torch.randint(eval_net.label_dim, (n,), device=device, generator=g)
+        labels = torch.eye(eval_net.label_dim, device=device)[idx]
+    latents = samplers.sample(eval_net, noise, labels=labels, gnet=gnet,
+                              sampler=sampler, num_steps=num_steps, guidance=guidance)
+    return encoder.decode(latents)
+
+#----------------------------------------------------------------------------
 # Main training loop.
 
 def training_loop(
@@ -79,6 +122,13 @@ def training_loop(
     force_finite        = True,     # Get rid of NaN/Inf gradients before feeding them to the optimizer.
     cudnn_benchmark     = True,     # Enable torch.backends.cudnn.benchmark?
     device              = torch.device('cuda'),
+
+    combra_metrics      = True,     # Compute combra generative-quality metrics each snapshot tick.
+    num_fid_samples     = 10000,    # Fakes generated (across all ranks) per combra eval. 0 = disable.
+    combra_ref_count    = None,     # Real reference images for combra. None = whole training set.
+    eval_sampler        = 'edm',    # Sampler used for eval-time / snapshot generation.
+    eval_num_steps      = 32,       # Sampling steps for eval-time / snapshot generation.
+    eval_guidance       = 1,        # Classifier-free guidance strength for eval-time generation.
 ):
     # Initialize.
     prev_status_time = time.time()
@@ -140,13 +190,56 @@ def training_loop(
     dist.print0(f'Training from {state.cur_nimg // 1000} kimg to {stop_at_nimg // 1000} kimg:')
     dist.print0()
 
+    # Setup DiffiT-style logging: multi-format logger (log.txt / progress.csv /
+    # progress.json) on every rank + TensorBoard on rank 0, with logger.log() text
+    # mirrored to TensorBoard and stats.jsonl.
+    rank, world_size = dist.get_rank(), dist.get_world_size()
+    # rank 0: stdout (dnnlib.Logger tees it into log.txt) + progress.csv/json.
+    # other ranks: their own per-rank log file only.
+    tblog.configure(log_dir=run_dir, format_strs=(['stdout', 'csv', 'json'] if rank == 0 else ['log']))
+    sw = None
+    if rank == 0:
+        stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'at')
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            sw = SummaryWriter(run_dir)
+            tblog.register_tb_writer(sw, stats_jsonl)
+        except ImportError:
+            dist.print0('TensorBoard not available; skipping tfevents.')
+
+    # Precompute the combra reference (sharded across all ranks) once, so the
+    # cached features are reused every eval tick. Reference = whole training set.
+    use_combra = bool(combra_metrics) and combra_mod.HAS_COMBRA and (num_fid_samples or 0) > 0
+    if combra_metrics and not combra_mod.HAS_COMBRA:
+        dist.print0('WARNING: --combra-metrics requested but combra is not installed; skipping.')
+    combra_ref = None
+    if use_combra:
+        ref_count = combra_ref_count if combra_ref_count is not None else len(dataset_obj)
+        dist.print0(f'Precomputing combra reference from {min(ref_count, len(dataset_obj))} images...')
+        local_ref = combra_mod.load_reference_shard(dataset_obj, encoder, ref_count, batch_gpu, device, rank, world_size)
+        if rank == 0:
+            combra_mod.combra_smoke_test(local_ref, device, dist.print0)
+        combra_ref = combra_mod.precompute_combra_reference(local_ref, device, rank, world_size)
+
+    # Save a grid of real images and an initial (pre-training) fakes grid.
+    if rank == 0:
+        grid_n = min(64, batch_gpu * num_accumulation_rounds)
+        grid_size = (8, 8) if grid_n >= 64 else (4, 4)
+        reals = torch.stack([encoder.decode(encoder.encode_latents(torch.as_tensor(dataset_obj[i][0]).to(device).unsqueeze(0)))[0]
+                             for i in range(min(grid_n, len(dataset_obj)))])
+        save_image_grid(reals, os.path.join(run_dir, 'reals.png'), grid_size)
+        init_fakes = _generate_grid(_primary_ema_net(ema, net), encoder, None, device,
+                                    sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
+        save_image_grid(init_fakes, os.path.join(run_dir, 'fakes_init.png'), grid_size)
+        net.train()
+
     # Main training loop.
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed, start_idx=state.cur_nimg)
     dataset_iterator = iter(dnnlib.util.construct_class_by_name(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_gpu, **data_loader_kwargs))
     prev_status_nimg = state.cur_nimg
     cumulative_training_time = 0
     start_nimg = state.cur_nimg
-    stats_jsonl = None
+    cur_tick = 0
     while True:
         done = (state.cur_nimg >= stop_at_nimg)
 
@@ -156,31 +249,51 @@ def training_loop(
             state.total_elapsed_time += cur_time - prev_status_time
             cur_process = psutil.Process(os.getpid())
             cpu_memory_usage = sum(p.memory_info().rss for p in [cur_process] + cur_process.children(recursive=True))
-            dist.print0(' '.join(['Status:',
-                'kimg',         f"{training_stats.report0('Progress/kimg',                              state.cur_nimg / 1e3):<9.1f}",
-                'time',         f"{dnnlib.util.format_time(training_stats.report0('Timing/total_sec',   state.total_elapsed_time)):<12s}",
-                'sec/tick',     f"{training_stats.report0('Timing/sec_per_tick',                        cur_time - prev_status_time):<8.2f}",
-                'sec/kimg',     f"{training_stats.report0('Timing/sec_per_kimg',                        cumulative_training_time / max(state.cur_nimg - prev_status_nimg, 1) * 1e3):<7.3f}",
-                'maintenance',  f"{training_stats.report0('Timing/maintenance_sec',                     cur_time - prev_status_time - cumulative_training_time):<7.2f}",
-                'cpumem',       f"{training_stats.report0('Resources/cpu_mem_gb',                       cpu_memory_usage / 2**30):<6.2f}",
-                'gpumem',       f"{training_stats.report0('Resources/peak_gpu_mem_gb',                  torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}",
-                'reserved',     f"{training_stats.report0('Resources/peak_gpu_mem_reserved_gb',         torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}",
+            fields = dict(
+                kimg        = training_stats.report0('Progress/kimg',                       state.cur_nimg / 1e3),
+                time        = training_stats.report0('Timing/total_sec',                    state.total_elapsed_time),
+                sec_per_tick= training_stats.report0('Timing/sec_per_tick',                 cur_time - prev_status_time),
+                sec_per_kimg= training_stats.report0('Timing/sec_per_kimg',                 cumulative_training_time / max(state.cur_nimg - prev_status_nimg, 1) * 1e3),
+                maintenance = training_stats.report0('Timing/maintenance_sec',              cur_time - prev_status_time - cumulative_training_time),
+                cpumem      = training_stats.report0('Resources/cpu_mem_gb',                cpu_memory_usage / 2**30),
+                gpumem      = training_stats.report0('Resources/peak_gpu_mem_gb',           torch.cuda.max_memory_allocated(device) / 2**30),
+                reserved    = training_stats.report0('Resources/peak_gpu_mem_reserved_gb',  torch.cuda.max_memory_reserved(device) / 2**30),
+            )
+            cur_tick += 1
+            # DiffiT-style console line (also written to log.txt, mirrored to TB text + stats.jsonl).
+            tblog.log(' '.join([
+                f"tick {cur_tick:<5d}",
+                f"kimg {fields['kimg']:<9.1f}",
+                f"time {dnnlib.util.format_time(fields['time']):<12s}",
+                f"sec/tick {fields['sec_per_tick']:<8.2f}",
+                f"sec/kimg {fields['sec_per_kimg']:<7.3f}",
+                f"maintenance {fields['maintenance']:<7.2f}",
+                f"cpumem {fields['cpumem']:<6.2f}",
+                f"gpumem {fields['gpumem']:<6.2f}",
+                f"reserved {fields['reserved']:<6.2f}",
             ]))
             cumulative_training_time = 0
             prev_status_nimg = state.cur_nimg
             prev_status_time = cur_time
             torch.cuda.reset_peak_memory_stats()
 
-            # Flush training stats.
+            # Flush training stats to stats.jsonl, progress.csv/json and TensorBoard.
             training_stats.default_collector.update()
-            if dist.get_rank() == 0:
-                if stats_jsonl is None:
-                    stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'at')
+            if rank == 0:
                 fmt = {'Progress/tick': '%.0f', 'Progress/kimg': '%.3f', 'timestamp': '%.3f'}
-                items = [(name, value.mean) for name, value in training_stats.default_collector.as_dict().items()] + [('timestamp', time.time())]
+                collected = [(name, value.mean) for name, value in training_stats.default_collector.as_dict().items()]
+                items = collected + [('timestamp', time.time())]
                 items = [f'"{name}": ' + (fmt.get(name, '%g') % value if np.isfinite(value) else 'NaN') for name, value in items]
                 stats_jsonl.write('{' + ', '.join(items) + '}\n')
                 stats_jsonl.flush()
+                for name, value in collected:
+                    tblog.logkv(name, float(value))
+                    if sw is not None and np.isfinite(value):
+                        sw.add_scalar(name, float(value), global_step=int(state.cur_nimg / 1e3), walltime=state.total_elapsed_time)
+                tblog.logkv('Progress/tick', cur_tick)
+                tblog.dumpkvs()
+                if sw is not None:
+                    sw.flush()
 
             # Update progress and check for abort.
             dist.update_progress(state.cur_nimg // 1000, stop_at_nimg // 1000)
@@ -188,6 +301,38 @@ def training_loop(
                 dist.request_suspend()
             if dist.should_stop() or dist.should_suspend():
                 done = True
+
+        # Evaluate combra metrics (all ranks generate their shard; rank 0
+        # aggregates) and save a fakes grid. Runs at snapshot cadence, entirely
+        # outside the loss/optimizer/EMA update path.
+        at_snapshot = snapshot_nimg is not None and state.cur_nimg % snapshot_nimg == 0 and (state.cur_nimg != start_nimg or start_nimg == 0)
+        if at_snapshot and (use_combra or rank == 0):
+            eval_net = _primary_ema_net(ema, net)
+            eval_net.eval()
+            if use_combra:
+                stats_metrics = combra_mod.compute_combra_metrics(
+                    eval_net, encoder, combra_ref, num_fid_samples, batch_gpu, device, rank, world_size,
+                    sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance,
+                    seed=seed + state.cur_nimg, log_fn=dist.print0)
+                if rank == 0 and stats_metrics:
+                    gstep, walltime = int(state.cur_nimg / 1e3), state.total_elapsed_time
+                    stats_jsonl.write(json.dumps(dict(stats_metrics, timestamp=time.time(), kimg=state.cur_nimg / 1e3)) + '\n')
+                    stats_jsonl.flush()
+                    for name, value in stats_metrics.items():
+                        tblog.logkv(name, value)
+                        if sw is not None and np.isfinite(value):
+                            sw.add_scalar(f'Metrics/{name}', value, global_step=gstep, walltime=walltime)
+                    tblog.dumpkvs()
+                    if sw is not None:
+                        sw.flush()
+                    tblog.log('Metrics: ' + '  '.join(f'{k} {v:g}' for k, v in stats_metrics.items()))
+            if rank == 0:
+                grid_n = min(64, batch_gpu * num_accumulation_rounds)
+                grid_size = (8, 8) if grid_n >= 64 else (4, 4)
+                fakes = _generate_grid(eval_net, encoder, None, device, sampler=eval_sampler,
+                                       num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
+                save_image_grid(fakes, os.path.join(run_dir, f'fakes{state.cur_nimg // 1000:06d}.png'), grid_size)
+                net.train()
 
         # Save network snapshot.
         if snapshot_nimg is not None and state.cur_nimg % snapshot_nimg == 0 and (state.cur_nimg != start_nimg or start_nimg == 0) and dist.get_rank() == 0:

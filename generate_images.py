@@ -68,53 +68,12 @@ config_presets = {
 }
 
 #----------------------------------------------------------------------------
-# EDM sampler from the paper
-# "Elucidating the Design Space of Diffusion-Based Generative Models",
-# extended to support classifier-free guidance.
+# Samplers live in training/samplers.py so training-time eval and generation
+# share one implementation. `edm_sampler` is the EDM 2nd-order Heun sampler
+# (kept importable here for backward compatibility); `training.samplers.sample`
+# additionally dispatches to euler / ddim / dpm++.
 
-def edm_sampler(
-    net, noise, labels=None, gnet=None,
-    num_steps=32, sigma_min=0.002, sigma_max=80, rho=7, guidance=1,
-    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1,
-    dtype=torch.float32, randn_like=torch.randn_like,
-):
-    # Guided denoiser.
-    def denoise(x, t):
-        Dx = net(x, t, labels).to(dtype)
-        if guidance == 1:
-            return Dx
-        ref_Dx = gnet(x, t, labels).to(dtype)
-        return ref_Dx.lerp(Dx, guidance)
-
-    # Time step discretization.
-    step_indices = torch.arange(num_steps, dtype=dtype, device=noise.device)
-    t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
-    t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]) # t_N = 0
-
-    # Main sampling loop.
-    x_next = noise.to(dtype) * t_steps[0]
-    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])): # 0, ..., N-1
-        x_cur = x_next
-
-        # Increase noise temporarily.
-        if S_churn > 0 and S_min <= t_cur <= S_max:
-            gamma = min(S_churn / num_steps, np.sqrt(2) - 1)
-            t_hat = t_cur + gamma * t_cur
-            x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
-        else:
-            t_hat = t_cur
-            x_hat = x_cur
-
-        # Euler step.
-        d_cur = (x_hat - denoise(x_hat, t_hat)) / t_hat
-        x_next = x_hat + (t_next - t_hat) * d_cur
-
-        # Apply 2nd order correction.
-        if i < num_steps - 1:
-            d_prime = (x_next - denoise(x_next, t_next)) / t_next
-            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
-
-    return x_next
+from training.samplers import edm_sampler, sample as sampler_dispatch  # noqa: E402
 
 #----------------------------------------------------------------------------
 # Wrapper for torch.Generator that allows specifying a different random seed
@@ -153,7 +112,7 @@ def generate_images(
     encoder_batch_size  = 4,                    # Maximum batch size for the encoder. None = default.
     verbose             = True,                 # Enable status prints?
     device              = torch.device('cuda'), # Which compute device to use.
-    sampler_fn          = edm_sampler,          # Which sampler function to use.
+    sampler             = 'edm',                # Which sampler to use: edm, euler, ddim, dpm++.
     **sampler_kwargs,                           # Additional arguments for the sampler function.
 ):
     # Rank 0 goes first.
@@ -223,8 +182,8 @@ def generate_images(
                             r.labels[:, class_idx] = 1
 
                     # Generate images.
-                    latents = dnnlib.util.call_func_by_name(func_name=sampler_fn, net=net, noise=r.noise,
-                        labels=r.labels, gnet=gnet, randn_like=rnd.randn_like, **sampler_kwargs)
+                    latents = sampler_dispatch(net=net, noise=r.noise, labels=r.labels, gnet=gnet,
+                        randn_like=rnd.randn_like, sampler=sampler, **sampler_kwargs)
                     r.images = encoder.decode(latents)
 
                     # Save images.
@@ -270,6 +229,7 @@ def parse_int_list(s):
 @click.option('--class', 'class_idx',       help='Class label  [default: random]', metavar='INT',                   type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                               type=click.IntRange(min=1), default=32, show_default=True)
 
+@click.option('--sampler',                  help='Reverse-diffusion sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='edm', show_default=True)
 @click.option('--steps', 'num_steps',       help='Number of sampling steps', metavar='INT',                         type=click.IntRange(min=1), default=32, show_default=True)
 @click.option('--sigma_min',                help='Lowest noise level', metavar='FLOAT',                             type=click.FloatRange(min=0, min_open=True), default=0.002, show_default=True)
 @click.option('--sigma_max',                help='Highest noise level', metavar='FLOAT',                            type=click.FloatRange(min=0, min_open=True), default=80, show_default=True)

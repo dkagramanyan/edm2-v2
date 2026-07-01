@@ -1,258 +1,263 @@
-## EDM2 and Autoguidance &mdash; Official PyTorch implementation
+# EDM2: Analyzing and Improving the Training Dynamics of Diffusion Models (v2 refresh)
 
-![Teaser image](./docs/teaser-2048x512.jpg)
+Official EDM2 codebase, refreshed to match the **DiffiT-v2** workflow: a
+multi-format training logger, inline **combra** generative-quality metrics
+computed **across all GPU ranks**, a packaged `click` + console-entry-point API,
+class-conditional ImageNet latent-diffusion training at **256 / 512 / 1024**,
+and multiple reverse-diffusion samplers (**EDM Heun / Euler / DDIM / DPM-Solver++**).
+
+Based on:
 
 **Analyzing and Improving the Training Dynamics of Diffusion Models** (CVPR 2024 oral)<br>
 Tero Karras, Miika Aittala, Jaakko Lehtinen, Janne Hellsten, Timo Aila, Samuli Laine<br>
-https://arxiv.org/abs/2312.02696<br>
+https://arxiv.org/abs/2312.02696
 
 **Guiding a Diffusion Model with a Bad Version of Itself** (NeurIPS 2024 oral)<br>
-Tero Karras, Miika Aittala, Tuomas Kynk&auml;&auml;nniemi, Jaakko Lehtinen, Timo Aila, Samuli Laine<br>
-https://arxiv.org/abs/2406.02507<br>
+Tero Karras, Miika Aittala, Tuomas Kynkäänniemi, Jaakko Lehtinen, Timo Aila, Samuli Laine<br>
+https://arxiv.org/abs/2406.02507
 
-For business inquiries, please visit our website and submit the form: [NVIDIA Research Licensing](https://www.nvidia.com/en-us/research/inquiries/)
+> **The training math is unchanged.** The EDM2 loss, learning-rate schedule,
+> optimizer step, magnitude-preserving network, preconditioning and Power-Function
+> EMA (the "training dynamics and update layers") are preserved exactly. Everything
+> new below runs *around* that core — at logging, inference and eval time only.
 
-## Requirements
+## Differences from upstream NVlabs/edm2
 
-* Linux and Windows are supported, but we recommend Linux for performance and compatibility reasons.
-* 1+ high-end NVIDIA GPU for sampling and 8+ GPUs for training. We have done all testing and development using V100 and A100 GPUs.
-* 64-bit Python 3.9 and PyTorch 2.1 (or later). See https://pytorch.org for PyTorch install instructions.
-* Other Python libraries: `pip install click Pillow psutil requests scipy tqdm diffusers==0.26.3 accelerate==0.27.2`
-* For downloading the raw snapshots needed for post-hoc EMA reconstruction, we recommend using [Rclone](https://rclone.org/install/).
+| Area | Upstream edm2 | This refresh |
+|---|---|---|
+| **Logging** | single `Status:` line + `stats.jsonl` | DiffiT-style logger: `log.txt`, `progress.csv`, `progress.json`, `stats.jsonl`, TensorBoard (`events.out.tfevents.*`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids |
+| **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
+| **Samplers** | EDM 2nd-order Heun only | `edm` (Heun, default), `euler`, `ddim`, `dpm++` (DPM-Solver++ 2M), σ-space, selectable at training-eval, generation and bulk sampling |
+| **Step-count analysis** | — | `edm2-compare-samplers`: sweep samplers × step counts, score with combra, find the optimal number of sampling steps (metric-vs-steps plateau) |
+| **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points (`edm2-train`, `edm2-gen-images`, `edm2-sample`, `edm2-eval`, `edm2-compare-samplers`, `edm2-prepare-data`, `edm2-download-models`) |
+| **Resolutions** | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets + sbatch for 256/512/1024 |
 
-For convenience, we provide a [Dockerfile](./Dockerfile) with the required dependencies. You can use it as follows:
+## Installation
 
-```.bash
-# Build Docker image
-docker build --tag edm2:latest .
+64-bit **Python 3.10+** (3.12 recommended). Install the latest **PyTorch** from
+the CUDA 13.x wheels, then the package:
 
-# Run generate_images.py using Docker
-docker run --gpus all -it --rm --user $(id -u):$(id -g) \
-    -v `pwd`:/scratch --workdir /scratch -e HOME=/scratch \
-    edm2:latest \
-    python generate_images.py --preset=edm2-img512-s-guid-dino --outdir=out
+```bash
+conda create -n edm2 python=3.12 -y
+conda activate edm2
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu132
+pip install -e '.[combra]'      # omit [combra] to train without inline combra metrics
 ```
 
-If you hit an error, please ensure you have correctly installed the [NVIDIA container runtime](https://docs.docker.com/config/containers/resource_constraints/#gpu). See [NVIDIA PyTorch container release notes](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-24-02.html#rel-24-02) for driver compatibility details.
+`combra` (the WC-Co computer-vision metrics library) is optional; the import is
+guarded, so training runs unchanged without it. Its base dependencies cover every
+image metric — FID (pytorch-fid), CMMD (open-clip-torch), FD-DINOv2 (torch.hub
+DINOv2). Pre-fetch the VAE and metric backbones for offline nodes:
 
-Breakdown of the `docker run` command line:
-
-- `--gpus all -it --rm --user $(id -u):$(id -g)`: With all GPUs enabled, run an interactive session with current user's UID/GID to avoid Docker writing files as root.
-- ``-v `pwd`:/scratch --workdir /scratch``: Mount current running dir (e.g., the top of this git repo on your host machine) to `/scratch` in the container and use that as the current working dir.
-- `-e HOME=/scratch`: Specify where to cache temporary files. If you want more fine-grained control, you can instead set `DNNLIB_CACHE_DIR` (for pre-trained model download cache). You want these cache dirs to reside on persistent volumes so that their contents are retained across multiple `docker run` invocations.
-
-## Using pre-trained models
-
-We provide pre-trained models for our proposed EDM2 configuration (config G) for different model sizes trained with ImageNet-512 and ImageNet-64. To generate images using a given model, run:
-
-```.bash
-# Generate a couple of images and save them as out/*.png
-python generate_images.py --preset=edm2-img512-s-guid-dino --outdir=out
+```bash
+edm2-download-models
 ```
 
-The above command automatically downloads the necessary models and caches them under `$HOME/.cache/dnnlib`, which can be overridden by setting the `DNNLIB_CACHE_DIR` environment variable. The `--preset=edm2-img512-s-guid-dino` option indicates that we will be using the S-sized EDM2 model, trained with ImageNet-512 and sampled using guidance, with EMA length and guidance strength chosen to minimize FD<sub>DINOv2</sub>. The following presets are supported:
+## Class conditioning — how the model is made conditional
 
-```
-# EDM2 paper
-edm2-img512-{xs|s|m|l|xl|xxl}-fid              # Table 2, minimize fid
-edm2-img512-{xs|s|m|l|xl|xxl}-dino             # Table 5, minimize fd_dinov2
-edm2-img64-{s|m|l|xl}-fid                      # Table 3, minimize fid
-edm2-img512-{xs|s|m|l|xl|xxl}-guid-{fid|dino}  # Table 2, classifier-free guidance
+EDM2 is a **class-conditional** diffusion model. Conditioning is expressed with a
+few composable methods, all available here:
 
-# Autoguidance paper
-edm2-img512-{s|xxl}-autog-{fid|dino}           # Table 1, conditional ImageNet-512
-edm2-img512-s-uncond-autog-{fid|dino}          # Table 1, unconditional ImageNet-512
-edm2-img64-s-autog-{fid|dino}                  # Table 1, conditional ImageNet-64
-```
+- **One-hot class labels.** The network is built with `label_dim = <num classes>`
+  (inferred from the dataset). The label embedding is combined with the noise
+  embedding inside the U-Net (`label_balance`), so the denoiser
+  `net(x, sigma, class_labels)` is conditioned on the class. Train conditional with
+  `--cond=True` (default); a dataset with no labels + `--cond=False` gives an
+  unconditional model (`label_dim = 0`).
+- **Null (unconditional) label.** Passing `class_labels=None` (or an all-zero
+  one-hot) evaluates the model unconditionally — this is what the guiding network
+  uses, and what omitting `--class` combined with a null network produces.
+- **Classifier-free / auto-guidance.** At sampling time you can steer generation
+  with a second *guiding* network via `--gnet` and `--guidance` (strength `> 1`):
+  the denoiser output is extrapolated away from the guiding network's,
+  `D = lerp(D_guide, D_main, guidance)`. Use the model's own weaker/earlier
+  checkpoint (autoguidance) or an unconditional model as `--gnet`. `--guidance 1`
+  (default) disables guidance. The same `--guidance` is honored during training-time
+  combra eval and by every sampler (`edm/euler/ddim/dpm++`).
+- **Specific class.** `edm2-gen-images --class=<idx>` (and `edm2-sample --class=<idx>`)
+  fixes the class label for all generated images; without it, a class is sampled
+  at random per image.
 
-Each of these maps to a specific set of options that point to the models in [https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/](https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/). For example, `--preset=edm2-img512-xxl-guid-dino` is equivalent to:
+## Data preparation (ImageNet)
 
-```.bash
-# Expanded command line for --preset=edm2-img512-xxl-guid-dino
-python generate_images.py \
-    --net=https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/edm2-img512-xxl-0939524-0.015.pkl \
-    --gnet=https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/edm2-img512-xs-uncond-2147483-0.015.pkl \
-    --guidance=1.7 \
-    --outdir=out
-```
+Convert an ImageNet-like dataset to a training zip in the VAE latent space (labels
+are stored in `dataset.json`), using ADM/Dhariwal center-cropping:
 
-In other words, we will use the XXL-sized conditional model at 939524 kimg and EMA length 0.015, and guide it with respect to the XS-sized unconditional model at 2147483 kimg with guidance strength 1.7. For further details, see `config_presets` in [`generate_images.py`](./generate_images.py).
-
-## Calculating FLOPs and metrics
-
-The computational cost of a given model can be estimated using `count_flops.py`:
-
-```.bash
-# Calculate FLOPs for a given model
-python count_flops.py \
-    https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/edm2-img512-s-2147483-0.130.pkl
+```bash
+edm2-prepare-data --source=/data/imagenet --dest=datasets/imagenet_512x512.zip \
+    --resolution=512x512 --transform=center-crop-dhariwal
 ```
 
-To calculate FID and FD<sub>DINOv2</sub>, we first need to generate 50,000 random images. This can be quite time-consuming in practice, so it makes sense to distribute the workload across multiple GPUs. This can be done by launching `generate_images.py` through `torchrun`:
+Produce one zip per target resolution (`256x256`, `512x512`, `1024x1024`). The
+model resolution follows the dataset's latent resolution (32² / 64² / 128²).
 
-```.bash
-# Generate 50000 images using 8 GPUs and save them as out/*/*.png
-torchrun --standalone --nproc_per_node=8 generate_images.py \
-    --preset=edm2-img512-s-guid-fid --outdir=out --subdirs --seeds=0-49999
+## Training
+
+Pick a preset with `--preset`; any CLI option overrides the preset. Launch with
+`torchrun` for multi-GPU (the global batch is reached via gradient accumulation
+automatically):
+
+```bash
+# 256²
+torchrun --standalone --nproc_per_node=2 train_edm2.py \
+    --outdir=training-runs --preset=edm2-img256-s \
+    --data=datasets/imagenet_256x256.zip --batch-gpu=96
+
+# 512²
+torchrun --standalone --nproc_per_node=2 train_edm2.py \
+    --outdir=training-runs --preset=edm2-img512-s \
+    --data=datasets/imagenet_512x512.zip --batch-gpu=32
+
+# 1024²
+torchrun --standalone --nproc_per_node=2 train_edm2.py \
+    --outdir=training-runs --preset=edm2-img1024-s \
+    --data=datasets/imagenet_1024x1024.zip --batch-gpu=8
 ```
 
-Alternatively, `generate_images.py` can be launched as a multi-GPU or multi-node job in a compute cluster. This should work out-of-the-box as long as the cluster environment spawns a separate process for each GPU and populates the necessary environment variables. For further details, please refer to the [`torchrun`](https://pytorch.org/docs/stable/elastic/run.html) documetation.
+To **resume**, run the exact same command again — training auto-resumes from the
+latest `training-state-*.pt` in `--outdir`.
 
-Having generated 50,000 images, FID and FD<sub>DINOv2</sub> can then be calculated using `calculate_metrics.py`:
+Ready-made SLURM scripts (H200) live in `sbatch/`:
 
-```.bash
-# Calculate metrics for a random subset of 50000 images in out/
-python calculate_metrics.py calc --images=out \
-    --ref=https://nvlabs-fi-cdn.nvidia.com/edm2/dataset-refs/img512.pkl
+```bash
+sbatch sbatch/train_2h200_256x256.sbatch
+sbatch sbatch/train_2h200_512x512.sbatch
+sbatch sbatch/train_2h200_1024x1024.sbatch
 ```
 
-Here, the `--ref` option points to pre-computed reference statistics for the dataset that the model was originally trained with. The necessary reference statistics for our pre-trained models are available at [https://nvlabs-fi-cdn.nvidia.com/edm2/dataset-refs/](https://nvlabs-fi-cdn.nvidia.com/edm2/dataset-refs/).
+### Key training options
 
-Note that the numerical values of the metrics vary across different random seeds and are highly sensitive to the number of images. By default, `calculate_metrics.py` uses 50,000 generated images, in line with established best practices. Providing fewer images will result in an error, whereas providing more will use a random subset. To reduce the effect of random variation, we recommend repeating the calculation multiple times with different random seeds, e.g., `--seeds=0-49999`, `--seeds=50000-99999`, and `--seeds=100000-149999`. In our paper, we calculated each metric multiple times and reported the minimum.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--outdir` | required | Output directory for the run |
+| `--data` | required | Dataset zip/dir (`edm2-prepare-data` output) |
+| `--preset` | `edm2-img512-s` | Config preset (`edm2-img256/512/1024-*`, `edm2-img64-*`) |
+| `--cond` | `True` | Train class-conditional model |
+| `--batch-gpu` | auto | Per-GPU batch size (global batch reached via accumulation) |
+| `--fp16` | `True` | Mixed-precision training |
+| `--status` / `--snapshot` / `--checkpoint` | 128Ki / 8Mi / 128Mi | Status / snapshot / checkpoint intervals (images) |
+| `--combra-metrics / --no-combra-metrics` | on | Inline combra metrics each snapshot tick (all ranks) |
+| `--num-fid-samples` | 10000 | Fakes generated (all ranks) per combra eval; 0 disables |
+| `--combra-ref-count` | 0 (whole set) | Real reference images for combra |
+| `--sampler` | `edm` | Eval-time / snapshot sampler (`edm/euler/ddim/dpm++`) |
+| `--sampling-steps` | 32 | Eval-time sampling steps |
+| `--guidance` | 1 | Eval-time classifier-free guidance strength |
+| `-n, --dry-run` | off | Print resolved config and exit |
 
-When performing larger sweeps over, say, EMA lengths or training snapshots, it may be impractical to use `generate_images.py` as outlined above. As an alternative, the metrics can also be calculated directly for a given network pickle, generating the necessary images on the fly:
+### Training output
 
-```.bash
-# Calculate metrics directly for a given model without saving any images
-torchrun --standalone --nproc_per_node=8 calculate_metrics.py gen \
-    --net=https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/edm2-img512-s-2147483-0.130.pkl \
-    --ref=https://nvlabs-fi-cdn.nvidia.com/edm2/dataset-refs/img512.pkl \
-    --seed=123456789
+```
+training-runs/00000-.../
+├── training_options.json   # all hyperparameters
+├── log.txt                 # human-readable log (rank 0)
+├── log-rank001.txt …       # per-rank logs
+├── progress.csv            # CSV metrics
+├── progress.json           # JSON-lines metrics
+├── stats.jsonl             # SAN-v2-style stats + combra metrics
+├── events.out.tfevents.*   # TensorBoard
+├── reals.png               # real image grid
+├── fakes_init.png          # pre-training samples
+├── fakes000200.png …       # samples per snapshot tick
+├── network-snapshot-*.pkl  # EMA weights (inference artifact)
+└── training-state-*.pt     # full resumable state
 ```
 
-We also provide the necessary APIs to do these kinds of operations programmatically from external Python scripts. For further details, see `gen()` in [`calculate_metrics.py`](./calculate_metrics.py).
+Monitor with `tensorboard --logdir training-runs`.
 
-## Post-hoc EMA reconstruction
+## Quality metrics (combra, all ranks)
 
-The models in [https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/](https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/) correspond to specific choices for the EMA length. In addition, we also provide the raw snapshots for each training run in [https://nvlabs-fi-cdn.nvidia.com/edm2/raw-snapshots/](https://nvlabs-fi-cdn.nvidia.com/edm2/raw-snapshots/) that can be used to reconstruct arbitrary EMA profiles.
+With `--combra-metrics` on (default), every snapshot tick generates
+`--num-fid-samples` (10k) fakes **on all ranks** with the eval sampler, scored
+against the **whole training set** as the real reference. Feature and angle
+extraction is sharded per rank and gathered to rank 0, which computes the
+distances — so the metrics are computed on all GPU ranks, matching DiffiT-v2.
+Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:
 
-Note that the raw snapshots can take up a considerable amount of disk space. In the paper, we saved snapshots every 8Mi (= 8 [mebi](https://en.wikipedia.org/wiki/Binary_prefix#mebi) = 8&times;2<sup>20</sup>) training images, corresponding to 118&ndash;635 GB of data per training run depending on model size. In [https://nvlabs-fi-cdn.nvidia.com/edm2/raw-snapshots/](https://nvlabs-fi-cdn.nvidia.com/edm2/raw-snapshots/), we provide the snapshots at 32Mi intervals instead, corresponding to 30&ndash;159 GB per training run. We have done extensive testing to verify that this is sufficient for accurate reconstruction.
+- `combra_fid10k` (InceptionV3 FID), `combra_cmmd10k` (CLIP-MMD), `combra_fd_dinov2_10k` (DINOv2 Fréchet)
+- angle-density metrics: `combra_w1`, `combra_w2`, `combra_circular_w1/w2`, `combra_mu1/mu2`, `combra_sigma1/sigma2`, `combra_amp1/amp2`
 
-To reconstruct new EMA profiles, the first step is to download the raw snapshots corresponding to a given training run. We recommend using [Rclone](https://rclone.org/install/) for this:
+The offline `calculate_metrics.py` (`edm2-eval`) FID / FD-DINOv2 evaluator is kept
+unchanged for standalone reference-stats evaluation.
 
-```.bash
-# Download raw snapshots for the pre-trained edm2-img512-xs model
-rclone copy --progress --http-url https://nvlabs-fi-cdn.nvidia.com/edm2 \
-    :http:raw-snapshots/edm2-img512-xs/ raw-snapshots/edm2-img512-xs/
+## Generating samples
+
+Individual PNGs (per seed):
+
+```bash
+edm2-gen-images --net=training-runs/00000-.../network-snapshot-final.pkl \
+    --outdir=generated/512 --seeds=0-63 --sampler=dpm++ --steps=25 --class=207
 ```
 
-The above command downloads 128 network pickles, 238 MB each, yielding 29.8 GB in total. Once the download is complete, new EMA profiles can be reconstructed using `reconstruct_phema.py`:
+Bulk `.npz` for FID (distributed):
 
-```.bash
-# Reconstruct a new EMA profile with std=0.150
-python reconstruct_phema.py --indir=raw-snapshots/edm2-img512-xs \
-    --outdir=out --outstd=0.150
+```bash
+torchrun --standalone --nproc_per_node=4 sample_images.py \
+    --net=…/network-snapshot-final.pkl --outdir=samples/512 \
+    --num-samples=50000 --batch=16 --sampler=dpm++ --steps=25
 ```
 
-This reads each of the input pickles once and saves the reconstructed model at `out/phema-2147483-0.150.pkl`, to be used with, e.g., `generate_images.py`. To perform a sweep over EMA length, it is also possible reconstruct multiple EMA profiles simultaneously:
+SLURM: `sbatch sbatch/generate_1gpu_{256,512,1024}.sbatch`,
+`sbatch sbatch/sample_4gpu_{256,512,1024}.sbatch`.
 
-```.bash
-# Reconstruct a set of 31 EMA profiles, streaming over the input data 4 times
-python reconstruct_phema.py --indir=raw-snapshots/edm2-img512-xs \
-    --outdir=out --outstd=0.010,0.015,...,0.250 --batch=8
+## Samplers
+
+All samplers run in EDM σ-space on the same `net(x, σ, labels)` denoiser and honor
+`--guidance`/`--gnet`:
+
+- **`edm`** — 2nd-order Heun (EDM paper, default; supports stochasticity via `S_churn`).
+- **`euler`** — 1st-order deterministic Euler.
+- **`ddim`** — deterministic DDIM (η=0), which is the first-order EDM step (≡ `euler`).
+- **`dpm++`** — DPM-Solver++(2M) in log-σ space, fast (~25 steps).
+
+## Finding the optimal number of sampling steps
+
+`edm2-compare-samplers` sweeps samplers × step counts, scores each batch against a
+real reference with `combra.metrics.compare_samplers`, and writes a table + plot;
+the metric-vs-steps curve plateaus at the optimal step count per sampler:
+
+```bash
+python compare_samplers.py \
+    --net=…/network-snapshot-final.pkl --data=datasets/imagenet_256x256.zip \
+    --samplers=edm,euler,ddim,dpm++ --k-values=5,10,20,50,100,250 \
+    --num-samples=512 --outdir=sampler-comparison/256
+# -> sampler_comparison.parquet + sampler_comparison.png
 ```
 
-See [`python reconstruct_phema.py --help`](./docs/phema-help.txt) for the full list of options.
+SLURM: `sbatch sbatch/compare_samplers_256x256.sbatch`.
 
-Note that our post-hoc EMA approach is not specific to diffusion models in any way &mdash; it can be applied to other kinds of deep learning models as well. To try it out in your own training runs, you can **(1)** include [`training/phema.py`](./training/phema.py) in your codebase, **(2)** modify your training loop to use `phema.PowerFunctionEMA`, and **(3)** take a copy of [`reconstruct_phema.py`](./reconstruct_phema.py) and modify it to suit your needs.
+## Project structure
 
-## Preparing datasets
-
-Datasets are stored as uncompressed ZIP archives containing uncompressed PNG or NPY files, along with a metadata file `dataset.json` for labels. When using latent diffusion, it is necessary to create two different versions of a given dataset: the original RGB version, used for evaluation, and a VAE-encoded latent version, used for training.
-
-To set up ImageNet-512:
-
-1. Download the ILSVRC2012 data archive from [Kaggle](https://www.kaggle.com/competitions/imagenet-object-localization-challenge/data) and extract it somewhere, e.g., `downloads/imagenet`.
-
-2. Crop and resize the images to create the original RGB dataset:
-
-```.bash
-# Convert raw ImageNet data to a ZIP archive at 512x512 resolution
-python dataset_tool.py convert --source=downloads/imagenet/ILSVRC/Data/CLS-LOC/train \
-    --dest=datasets/img512.zip --resolution=512x512 --transform=center-crop-dhariwal
+```
+edm2-v2/
+├── train_edm2.py            # training entry point (edm2-train)
+├── generate_images.py       # per-seed PNG generation (edm2-gen-images)
+├── sample_images.py         # bulk .npz sampling (edm2-sample)
+├── compare_samplers.py      # optimal-steps analysis (edm2-compare-samplers)
+├── calculate_metrics.py     # offline FID / FD-DINOv2 (edm2-eval)
+├── dataset_tool.py          # dataset preparation (edm2-prepare-data)
+├── download_models.py       # prefetch VAE + combra backbones (edm2-download-models)
+├── training/
+│   ├── training_loop.py     # main loop (frozen loss/optimizer/EMA update)
+│   ├── networks_edm2.py     # Precond + magnitude-preserving U-Net (frozen)
+│   ├── phema.py             # Power-Function / Traditional EMA (frozen)
+│   ├── encoders.py          # RGB / Stability VAE latent encode-decode
+│   ├── dataset.py           # ImageFolderDataset
+│   ├── logger.py            # DiffiT-style multi-format logger
+│   ├── metrics.py           # inline combra metrics, sharded across ranks
+│   └── samplers.py          # edm / euler / ddim / dpm++
+├── sbatch/                  # SLURM scripts (train/generate/sample/compare, 3 res)
+├── tests/test_smoke.py      # CPU smoke tests
+└── pyproject.toml           # packaging + console entry points
 ```
 
-3. Run the images through a pre-trained VAE encoder to create the corresponding latent dataset:
+## Tests
 
-```.bash
-# Convert the pixel data to VAE latents
-python dataset_tool.py encode --source=datasets/img512.zip \
-    --dest=datasets/img512-sd.zip
+```bash
+pip install pytest
+pytest tests/ -q
 ```
-
-4. Calculate reference statistics for the original RGB dataset, to be used with `calculate_metrics.py`:
-
-```.bash
-# Compute dataset reference statistics for calculating metrics
-python calculate_metrics.py ref --data=datasets/img512.zip \
-    --dest=dataset-refs/img512.pkl
-```
-
-## Training new models
-
-New models can be trained using `train_edm2.py`. For example, to train an XS-sized conditional model for ImageNet-512 using the same hyperparameters as in our paper, run:
-
-```.bash
-# Train XS-sized model for ImageNet-512 using 8 GPUs
-torchrun --standalone --nproc_per_node=8 train_edm2.py \
-    --outdir=training-runs/00000-edm2-img512-xs \
-    --data=datasets/img512-sd.zip \
-    --preset=edm2-img512-xs \
-    --batch-gpu=32
-```
-
-This example performs single-node training using 8 GPUs, but in practice, we recommend using at least 32 A100 GPUs, i.e., 4 DGX nodes. Note that training large models may easily run out of GPU memory, depending on the number of GPUs and the available VRAM. The best way to avoid this is to limit the per-GPU batch size using gradient accumulation. In the above example, the total batch size is 2048 images, i.e., 256 per GPU, but we limit it to 32 per GPU by specifying `--batch-gpu=32`. Modifying `--batch-gpu` is safe in the sense that it has no interaction with the other hyperparameters, whereas modifying the total batch size would also necessitate adjusting, e.g., the learning rate.
-
-By default, the training script prints status every 128Ki (= 128 [kibi](https://en.wikipedia.org/wiki/Binary_prefix#kibi) = 128&times;2<sup>10</sup>) training images (controlled by `--status`), saves network snapshots every 8Mi (= 8&times;2<sup>20</sup>) training images (controlled by `--snapshot`), and dumps training checkpoints every 128Mi training images (controlled by `--checkpoint`). The status is saved in `log.txt` (one-line summary) and `stats.json` (comprehensive set of statistics). The network snapshots are saved in `network-snapshot-*.pkl`, and they can be used directly with, e.g., `generate_images.py` and `reconstruct_phema.py`.
-
-The training checkpoints, saved in `training-state-*.pt`, can be used to resume the training at a later time.
-When the training script starts, it will automatically look for the highest-numbered checkpoint and load it if available. To resume training, simply run the same `train_edm2.py` command line again &mdash; it is important to use the same set of options to avoid accidentally changing the hyperparameters mid-training. If you wish to have the ability to suspend the training at any time so that no progress is lost, you can modify the `should_suspend()` function in [torch_utils/distributed.py](./torch_utils/distributed.py) to implement the desired signaling protocol.
-
-See [`python train_edm2.py --help`](./docs/train-help.txt) for the full list of options.
-
-## 2D toy example
-
-The 2D toy example used in the autoguidance paper can be reproduced with `toy_example.py`:
-
-```.bash
-# Visualize sampling distributions using autoguidance.
-python toy_example.py plot
-```
-
-See [`python toy_example.py --help`](./docs/toy-help.txt) for the full list of options.
-
-![2D toy example](./docs/toy-example.jpg)
 
 ## License
 
-Copyright &copy; 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
-All material, including source code and pre-trained models, is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/).
-
-## Citation
-
-```
-@inproceedings{Karras2024edm2,
-  title     = {Analyzing and Improving the Training Dynamics of Diffusion Models},
-  author    = {Tero Karras and Miika Aittala and Jaakko Lehtinen and
-               Janne Hellsten and Timo Aila and Samuli Laine},
-  booktitle = {Proc. CVPR},
-  year      = {2024},
-}
-
-@inproceedings{Karras2024autoguidance,
-  title     = {Guiding a Diffusion Model with a Bad Version of Itself},
-  author    = {Tero Karras and Miika Aittala and Tuomas Kynk\"a\"anniemi and
-               Jaakko Lehtinen and Timo Aila and Samuli Laine},
-  booktitle = {Proc. NeurIPS},
-  year      = {2024},
-}
-```
-
-## Development
-
-This is a research reference implementation and is treated as a one-time code drop. As such, we do not accept outside code contributions in the form of pull requests.
-
-## Acknowledgments
-
-We thank Eric Chan, Qinsheng Zhang, Erik H&auml;rk&ouml;nen, Arash Vahdat, Ming-Yu Liu, David Luebke, and Alex Keller for discussions and comments, and Tero Kuosmanen and Samuel Klenberg for maintaining our compute infrastructure.
+This codebase inherits the upstream EDM2 license (Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International — see `LICENSE.txt`).
