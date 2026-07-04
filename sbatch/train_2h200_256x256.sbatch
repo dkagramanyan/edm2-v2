@@ -25,12 +25,16 @@ export CUDA_VISIBLE_DEVICES=0,1
 nvidia-smi
 
 # EDM2 is pure PyTorch (no custom CUDA-op compilation): the conda env's torch
-# ships its own runtime, so no system CUDA module is required.
-torchrun --standalone --nproc_per_node=2 train_edm2.py \
-    --outdir=./training-runs \
-    --preset=edm2-img256-s \
-    --data=./datasets/imagenet_256x256.zip \
-    --batch-gpu=96 \
-    --combra-metrics \
+# ships its own runtime, so no system CUDA module is required. --gpus spawns the
+# workers internally (no torchrun).
+edm2-train \
+    --outdir=./runs/edm2-img256-s \
+    --cfg=edm2-img256-s \
+    --data=./datasets/imagenet_9to4_1024x1024_256x256.zip \
+    --gpus=2 \
+    --batch-gpu=64 \
+    --combra-metrics True \
+    --save-inference-only True \
+    --snap 100 \
     --sampler=dpm++ \
     --sampling-steps=25

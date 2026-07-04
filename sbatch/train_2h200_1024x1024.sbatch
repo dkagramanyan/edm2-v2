@@ -24,13 +24,17 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 nvidia-smi
 
-# 1024^2 has 128x128 latents: keep --batch-gpu small; EDM2 reaches the global
-# batch via gradient accumulation automatically.
-torchrun --standalone --nproc_per_node=2 train_edm2.py \
-    --outdir=./training-runs \
-    --preset=edm2-img1024-s \
-    --data=./datasets/imagenet_1024x1024.zip \
+# 1024^2 -> 128x128 latents, but the inline VAE still ingests full 1024^2 RGB:
+# keep --batch-gpu small; EDM2 reaches the global batch via gradient
+# accumulation automatically. --gpus spawns the workers internally (no torchrun).
+edm2-train \
+    --outdir=./runs/edm2-img1024-s \
+    --cfg=edm2-img1024-s \
+    --data=./datasets/imagenet_9to4_1024x1024_1024x1024.zip \
+    --gpus=2 \
     --batch-gpu=8 \
-    --combra-metrics \
+    --combra-metrics True \
+    --save-inference-only True \
+    --snap 100 \
     --sampler=dpm++ \
     --sampling-steps=25

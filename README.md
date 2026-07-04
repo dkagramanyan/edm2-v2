@@ -25,9 +25,11 @@ https://arxiv.org/abs/2406.02507
 
 | Area | Upstream edm2 | This refresh |
 |---|---|---|
-| **Logging** | single `Status:` line + `stats.jsonl` | DiffiT-style logger: `log.txt`, `progress.csv`, `progress.json`, `stats.jsonl`, TensorBoard (`events.out.tfevents.*`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids |
+| **Logging** | single `Status:` line + `stats.jsonl` | DiffiT-style logger: `log.txt`, `progress.csv`, `progress.json`, `stats.jsonl`, TensorBoard (`events.out.tfevents.*`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids. **Every scalar** (losses, LR, timing, resources, combra metrics, tick) **and the image grids are mirrored to TensorBoard** |
+| **Latent encoding** | dataset pre-encoded to an 8-channel latent zip offline | **inline VAE encode** (DiffiT-style): train latent diffusion straight from a raw-RGB zip, the frozen Stability VAE runs each step — no pre-encode pass. Offline 8-channel latent zips still work and are auto-detected |
+| **Checkpointing** | full resumable `training-state-*.pt` | self-contained inference `network-snapshot-*.pkl` (EMA + encoder) **plus** the resumable `.pt`; `--checkpoint=0` writes **inference-only** (DiffiT `--save-inference-only`) |
 | **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
-| **Samplers** | EDM 2nd-order Heun only | `edm` (Heun, default), `euler`, `ddim`, `dpm++` (DPM-Solver++ 2M), σ-space, selectable at training-eval, generation and bulk sampling |
+| **Samplers** | EDM 2nd-order Heun only | `edm` (Heun, default), `euler`, `ddim`, `dpm++` (DPM-Solver++ 2M), σ-space, **one implementation shared by training-eval, generation and bulk sampling** |
 | **Step-count analysis** | — | `edm2-compare-samplers`: sweep samplers × step counts, score with combra, find the optimal number of sampling steps (metric-vs-steps plateau) |
 | **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points (`edm2-train`, `edm2-gen-images`, `edm2-sample`, `edm2-eval`, `edm2-compare-samplers`, `edm2-prepare-data`, `edm2-download-models`) |
 | **Resolutions** | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets + sbatch for 256/512/1024 |

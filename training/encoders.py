@@ -132,6 +132,22 @@ class StabilityVAEEncoder(Encoder):
         return x
 
 #----------------------------------------------------------------------------
+# On-the-fly latent encoder: latent diffusion straight from a raw-RGB dataset
+# (DiffiT-style), running the frozen VAE inline every step instead of
+# pre-encoding the dataset to an 8-channel latent zip. `encode_latents` takes
+# uint8 RGB pixels and returns final latents, so every existing call site that
+# does `encoder.encode_latents(...)` trains in latent space with no other
+# change. The VAE encode runs under no_grad (the VAE is frozen and the latents
+# are training targets), keeping activation memory down.
+
+@persistence.persistent_class
+class StabilityVAEOnTheFlyEncoder(StabilityVAEEncoder):
+    def encode_latents(self, x): # raw RGB pixels => final latents (VAE inline)
+        with torch.no_grad():
+            raw = self.encode_pixels(x)
+        return super().encode_latents(raw)
+
+#----------------------------------------------------------------------------
 
 def load_stability_vae(vae_name='stabilityai/sd-vae-ft-mse', device=torch.device('cpu')):
     import dnnlib
