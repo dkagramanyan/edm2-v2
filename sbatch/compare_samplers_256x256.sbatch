@@ -18,13 +18,13 @@ export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_VISIBLE_DEVICES=0
 nvidia-smi
 
-MODEL=${MODEL:-./training-runs/00000-edm2-img256-s/network-snapshot-final.pkl}
+MODEL=${MODEL:-./runs/edm2-img256-s/network-snapshot-final.pkl}
 
 # Find the optimal number of sampling steps per sampler with combra
 # (metric-vs-steps curve + plateau). Needs `pip install -e '.[combra]'`.
 python compare_samplers.py \
     --net="$MODEL" \
-    --data=./datasets/imagenet_256x256.zip \
+    --data=./datasets/imagenet_9to4_1024x1024_256x256.zip \
     --num-samples=512 \
     --batch=32 \
     --samplers=edm,euler,ddim,dpm++ \

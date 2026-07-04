@@ -19,7 +19,7 @@ export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 nvidia-smi
 
-MODEL=${MODEL:-./training-runs/00000-edm2-img256-s/network-snapshot-final.pkl}
+MODEL=${MODEL:-./runs/edm2-img256-s/network-snapshot-final.pkl}
 
 # 50k samples as a single .npz for FID evaluation (edm2-eval / calculate_metrics.py).
 torchrun --standalone --nproc_per_node=4 sample_images.py \

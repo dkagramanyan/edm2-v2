@@ -24,11 +24,15 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 nvidia-smi
 
-torchrun --standalone --nproc_per_node=2 train_edm2.py \
-    --outdir=./training-runs \
-    --preset=edm2-img512-s \
-    --data=./datasets/imagenet_512x512.zip \
+# --gpus spawns the workers internally (no torchrun).
+edm2-train \
+    --outdir=./runs/edm2-img512-s \
+    --cfg=edm2-img512-s \
+    --data=./datasets/imagenet_9to4_1024x1024_512x512.zip \
+    --gpus=2 \
     --batch-gpu=32 \
-    --combra-metrics \
+    --combra-metrics True \
+    --save-inference-only True \
+    --snap 100 \
     --sampler=dpm++ \
     --sampling-steps=25

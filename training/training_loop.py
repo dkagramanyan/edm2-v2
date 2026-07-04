@@ -80,6 +80,7 @@ def save_image_grid(images_nchw_uint8, fname, grid_size):
         canvas[:, y:y + h, x:x + w] = img[idx]
     canvas = np.transpose(canvas, (1, 2, 0))
     PIL.Image.fromarray(canvas[:, :, 0] if c == 1 else canvas, {1: 'L', 3: 'RGB'}[c]).save(fname)
+    return canvas # HWC uint8, for optional TensorBoard logging
 
 @torch.inference_mode()
 def _generate_grid(eval_net, encoder, gnet, device, *, sampler, num_steps, guidance, seed, n):
@@ -227,10 +228,14 @@ def training_loop(
         grid_size = (8, 8) if grid_n >= 64 else (4, 4)
         reals = torch.stack([encoder.decode(encoder.encode_latents(torch.as_tensor(dataset_obj[i][0]).to(device).unsqueeze(0)))[0]
                              for i in range(min(grid_n, len(dataset_obj)))])
-        save_image_grid(reals, os.path.join(run_dir, 'reals.png'), grid_size)
+        reals_canvas = save_image_grid(reals, os.path.join(run_dir, 'reals.png'), grid_size)
         init_fakes = _generate_grid(_primary_ema_net(ema, net), encoder, None, device,
                                     sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
-        save_image_grid(init_fakes, os.path.join(run_dir, 'fakes_init.png'), grid_size)
+        init_canvas = save_image_grid(init_fakes, os.path.join(run_dir, 'fakes_init.png'), grid_size)
+        if sw is not None:
+            sw.add_image('reals', reals_canvas, global_step=0, dataformats='HWC')
+            sw.add_image('fakes', init_canvas, global_step=0, dataformats='HWC')
+            sw.flush()
         net.train()
 
     # Main training loop.
@@ -291,6 +296,8 @@ def training_loop(
                     if sw is not None and np.isfinite(value):
                         sw.add_scalar(name, float(value), global_step=int(state.cur_nimg / 1e3), walltime=state.total_elapsed_time)
                 tblog.logkv('Progress/tick', cur_tick)
+                if sw is not None:
+                    sw.add_scalar('Progress/tick', float(cur_tick), global_step=int(state.cur_nimg / 1e3), walltime=state.total_elapsed_time)
                 tblog.dumpkvs()
                 if sw is not None:
                     sw.flush()
@@ -331,7 +338,10 @@ def training_loop(
                 grid_size = (8, 8) if grid_n >= 64 else (4, 4)
                 fakes = _generate_grid(eval_net, encoder, None, device, sampler=eval_sampler,
                                        num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
-                save_image_grid(fakes, os.path.join(run_dir, f'fakes{state.cur_nimg // 1000:06d}.png'), grid_size)
+                fakes_canvas = save_image_grid(fakes, os.path.join(run_dir, f'fakes{state.cur_nimg // 1000:06d}.png'), grid_size)
+                if sw is not None:
+                    sw.add_image('fakes', fakes_canvas, global_step=int(state.cur_nimg / 1e3), dataformats='HWC')
+                    sw.flush()
                 net.train()
 
         # Save network snapshot.
