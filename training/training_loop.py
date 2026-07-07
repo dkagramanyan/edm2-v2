@@ -267,6 +267,7 @@ def training_loop(
             cur_tick += 1
             # DiffiT-style console line (also written to log.txt, mirrored to TB text + stats.jsonl).
             tblog.log(' '.join([
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]",
                 f"tick {cur_tick:<5d}",
                 f"kimg {fields['kimg']:<9.1f}",
                 f"time {dnnlib.util.format_time(fields['time']):<12s}",

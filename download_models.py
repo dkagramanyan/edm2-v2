@@ -30,13 +30,19 @@ def main(vae_names, do_combra):
 
     if do_combra:
         try:
-            from combra.metrics import compute_all_metrics
+            from combra.metrics import cmmd_features, fd_dinov2_features, fid_features
         except ImportError:
-            print('combra not installed; skipping metric backbones. `pip install combra` to fetch them.')
+            print("combra not installed; skipping metric backbones. `pip install -e '.[combra]'` to fetch them.")
             return
         print('Fetching combra metric backbones (InceptionV3 / CLIP / DINOv2) ...')
+        # Call the feature extractors directly rather than compute_all_metrics: each loads
+        # and caches its backbone, which is all we want. compute_all_metrics also runs the
+        # angle-density path, which needs real microstructure images and errors on blank
+        # dummies (empty pooled-angle arrays -> zero-size reduction).
         dummy = np.zeros((2, 64, 64, 3), dtype=np.uint8)
-        compute_all_metrics(dummy, dummy, device=device, image_metrics=True, reference_cache={})
+        fid_features(dummy, device=device)
+        cmmd_features(dummy, device=device)
+        fd_dinov2_features(dummy, device=device)
         print('  done')
 
 
