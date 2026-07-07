@@ -22,6 +22,7 @@ dependencies = [
     "psutil>=5.9.0",
     "tqdm>=4.64.1",
     "requests>=2.28.0",
+    "pyspng>=0.1.1",
 ]
 
 [project.optional-dependencies]
@@ -32,10 +33,13 @@ dev = [
 # Optional: enables combra.metrics during training-time eval and the
 # sampler-vs-steps comparison. Training runs unchanged without it (the import is
 # guarded). combra's base deps cover every image metric -- FID (pytorch-fid),
-# CLIP-MMD (open-clip-torch) and FD-DINOv2 (torch.hub DINOv2) -- so plain
-# `combra` is all that's needed.
+# CLIP-MMD (open-clip-torch) and FD-DINOv2 (torch.hub DINOv2).
+# combra is a private repo -- cloning requires GitHub auth. If you are logged in
+# via the GitHub CLI (`gh auth login`, HTTPS protocol), git inherits gh's
+# credential helper and the clone works automatically:
+#     pip install -e '.[combra]'
 combra = [
-    "combra",
+    "combra @ git+https://github.com/dkagramanyan/combra.git",
 ]
 
 # Console entry-points. After `pip install -e .` these are available on PATH.
