@@ -22,6 +22,13 @@ export NCCL_DEBUG=INFO
 export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_VISIBLE_DEVICES=0,1
 
+# This compute node has no internet. combra's metric backbones (CLIP via the HF
+# Hub, InceptionV3, DINOv2) are pre-cached on shared storage by
+# `edm2-download-models`; force HF offline so the CMMD CLIP load reads the cache
+# instead of hanging on a network request during combra precompute.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 nvidia-smi
 
 # --gpus spawns the workers internally (no torchrun).
