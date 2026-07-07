@@ -49,7 +49,16 @@ pip install -e '.[combra]'      # omit [combra] to train without inline combra m
 `combra` (the WC-Co computer-vision metrics library) is optional; the import is
 guarded, so training runs unchanged without it. Its base dependencies cover every
 image metric — FID (pytorch-fid), CMMD (open-clip-torch), FD-DINOv2 (torch.hub
-DINOv2). Pre-fetch the VAE and metric backbones for offline nodes:
+DINOv2). It lives in a **private** repo, so the `[combra]` extra clones it over
+`git+https` and only succeeds when you are authenticated to GitHub — sign in once
+with the GitHub CLI and `pip` inherits its credential helper:
+
+```bash
+gh auth login        # github.com → HTTPS
+pip install -e '.[combra]'
+```
+
+Pre-fetch the VAE and metric backbones for offline nodes:
 
 ```bash
 edm2-download-models
