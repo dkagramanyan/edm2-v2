@@ -7,15 +7,17 @@
 
 """Perform post-hoc EMA reconstruction."""
 
-import os
-import re
 import copy
-import warnings
-import click
-import tqdm
+import os
 import pickle
+import re
+import warnings
+
+import click
 import numpy as np
 import torch
+import tqdm
+
 import dnnlib
 import training.phema
 

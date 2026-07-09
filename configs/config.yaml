@@ -1,0 +1,65 @@
+# Hydra config for EDM2 training.
+#
+# train_edm2.py's click CLI is the single source of truth for every option and its
+# default (see train_hydra.py). Every option is listed here so it can be overridden
+# on the command line without Hydra's `+` prefix; `null` means "use the CLI default",
+# so the values below never duplicate — and never drift from — the click defaults.
+#
+#   python train_hydra.py outdir=./training-runs data=./datasets/wc_co_256x256.zip \
+#       preset=edm2-img256-s gpus=2 batch_gpu=64 eval_sampler=edm combra_metrics=false
+#
+# Option names are the Python names of the click flags (dashes become underscores);
+# note `--cfg` / `--preset` is named `preset`.
+defaults:
+  - _self_
+
+# Required -- no default in the CLI either.
+outdir: ???
+data: ???
+
+# Main.
+gpus: null
+cond: null
+preset: null
+latent: null            # null = latent for every preset except edm2-img64
+
+# Hyperparameters (null = taken from the preset).
+duration: null
+batch: null
+channels: null
+dropout: null
+P_mean: null
+P_std: null
+lr: null
+decay: null
+
+# Performance.
+batch_gpu: null
+fp16: null
+ls: null
+bench: null
+
+# I/O.
+status: null            # accepts the CLI's 128Ki / 8Mi / 128Mi suffixes
+snapshot: null
+snap: null
+checkpoint: null
+save_inference_only: null
+seed: null
+dry_run: null
+
+# Inline evaluation (combra metrics + eval-time sampler).
+combra_metrics: null
+num_fid_samples: null
+combra_ref_count: null
+eval_sampler: null
+eval_sampling_steps: null
+guidance: null
+
+# Keep the working directory at the repo root so relative data / outdir paths
+# behave exactly like the click CLI.
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .

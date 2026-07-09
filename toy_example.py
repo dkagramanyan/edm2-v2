@@ -7,16 +7,18 @@
 
 """2D toy example from the paper "Guiding a Diffusion Model with a Bad Version of Itself"."""
 
-import os
 import copy
+import functools
+import os
 import pickle
 import warnings
-import functools
+
+import click
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import click
 import tqdm
+
 import dnnlib
 from torch_utils import persistence
 

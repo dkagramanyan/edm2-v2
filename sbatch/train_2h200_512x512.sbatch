@@ -41,5 +41,5 @@ edm2-train \
     --combra-metrics True \
     --save-inference-only True \
     --snap 100 \
-    --sampler=dpm++ \
-    --sampling-steps=25
+    --eval-sampler=dpm++ \
+    --eval-sampling-steps=25

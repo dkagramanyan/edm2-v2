@@ -9,10 +9,11 @@
 
 import os
 import warnings
+
 import numpy as np
 import torch
-from torch_utils import persistence
-from torch_utils import misc
+
+from torch_utils import misc, persistence
 
 warnings.filterwarnings('ignore', 'torch.utils._pytree._register_pytree_node is deprecated.')
 warnings.filterwarnings('ignore', '`resume_download` is deprecated')
@@ -156,7 +157,7 @@ def load_stability_vae(vae_name='stabilityai/sd-vae-ft-mse', device=torch.device
     os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
     os.environ['HF_HOME'] = cache_dir
 
-    import diffusers # pip install diffusers # pyright: ignore [reportMissingImports]
+    import diffusers  # pip install diffusers # pyright: ignore [reportMissingImports]
     try:
         # First try with local_files_only to avoid consulting tfhub metadata if the model is already in cache.
         vae = diffusers.models.AutoencoderKL.from_pretrained(vae_name, cache_dir=cache_dir, local_files_only=True)

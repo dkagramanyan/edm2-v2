@@ -15,13 +15,15 @@ Example:
 """
 
 import os
+
 import click
 import numpy as np
 import torch
 import torch.distributed
 import tqdm
-from torch_utils import distributed as dist
+
 from generate_images import generate_images, parse_int_list
+from torch_utils import distributed as dist
 
 #----------------------------------------------------------------------------
 
@@ -46,8 +48,8 @@ def _gather_images(local_nhwc, device):
 @click.option('--batch', 'max_batch_size', help='Max batch size per GPU', metavar='INT', type=click.IntRange(min=1), default=32, show_default=True)
 @click.option('--class', 'class_idx', help='Class label  [default: random]', metavar='INT', type=click.IntRange(min=0), default=None)
 @click.option('--seed',         help='Base random seed', metavar='INT',                 type=int, default=0, show_default=True)
-@click.option('--sampler',      help='Reverse-diffusion sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='edm', show_default=True)
-@click.option('--steps', 'num_steps', help='Number of sampling steps', metavar='INT',   type=click.IntRange(min=1), default=32, show_default=True)
+@click.option('--sampler',      help='Reverse-diffusion sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='dpm++', show_default=True)
+@click.option('--steps', 'num_steps', help='Number of sampling steps', metavar='INT',   type=click.IntRange(min=1), default=25, show_default=True)
 @click.option('--sigma_min',    help='Lowest noise level', metavar='FLOAT',             type=click.FloatRange(min=0, min_open=True), default=0.002, show_default=True)
 @click.option('--sigma_max',    help='Highest noise level', metavar='FLOAT',            type=click.FloatRange(min=0, min_open=True), default=80, show_default=True)
 @click.option('--rho',          help='Time step exponent', metavar='FLOAT',             type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)

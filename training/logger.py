@@ -20,6 +20,13 @@ ERROR = 40
 
 DISABLED = 50
 
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def timestamp():
+    """Local system time, as stamped on every text event and key-value dump."""
+    return datetime.datetime.now().strftime(TIMESTAMP_FORMAT)
+
 
 class KVWriter(object):
     def writekvs(self, kvs):
@@ -37,8 +44,10 @@ class HumanOutputFormat(KVWriter, SeqWriter):
             self.file = open(filename_or_file, "wt")
             self.own_file = True
         else:
-            assert hasattr(filename_or_file, "read"), (
-                "expected file or str, got %s" % filename_or_file
+            # Only write/flush are ever used, and on rank 0 this is handed
+            # dnnlib.util.Logger (the stdout tee), which is write-only.
+            assert hasattr(filename_or_file, "write"), (
+                "expected writable file or str, got %s" % filename_or_file
             )
             self.file = filename_or_file
             self.own_file = False
@@ -156,7 +165,8 @@ class TBTextOutputFormat(SeqWriter):
         if self.jsonl is not None:
             try:
                 self.jsonl.write(json.dumps({
-                    "kind": "text", "msg": msg, "time": time.time(), "step": self._step,
+                    "kind": "text", "msg": msg, "time": time.time(),
+                    "datetime": timestamp(), "step": self._step,
                 }) + "\n")
                 self.jsonl.flush()
             except Exception:
@@ -297,7 +307,9 @@ class Logger(object):
         self.name2cnt[key] = cnt + 1
 
     def dumpkvs(self):
-        d = self.name2val
+        # Stamp every dumped row with the system time, so progress.csv /
+        # progress.json rows can be aligned with the text log and each other.
+        d = dict(self.name2val, datetime=timestamp(), wall_time=time.time())
         out = d.copy()
         for fmt in self.output_formats:
             if isinstance(fmt, KVWriter) and not isinstance(fmt, HumanOutputFormat):
@@ -321,8 +333,7 @@ class Logger(object):
             fmt.close()
 
     def _do_log(self, args):
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        prefixed = [f"[{timestamp}]"] + list(map(str, args))
+        prefixed = [f"[{timestamp()}]"] + list(map(str, args))
         for fmt in self.output_formats:
             if isinstance(fmt, SeqWriter):
                 fmt.writeseq(prefixed)

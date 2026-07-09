@@ -22,15 +22,15 @@ Example (see also sbatch/compare_samplers_256x256.sbatch):
         --outdir=sampler-comparison/256
 """
 
-import os
 import pickle
 from pathlib import Path
 
 import click
 import torch
+
 import dnnlib
 from torch_utils import distributed as dist
-from training.metrics import load_reference_shard, generate_fake_shard
+from training.metrics import generate_fake_shard, load_reference_shard
 
 try:
     from combra.metrics import compare_samplers, plot_sampler_comparison

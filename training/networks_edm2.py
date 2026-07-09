@@ -10,8 +10,8 @@
 
 import numpy as np
 import torch
-from torch_utils import persistence
-from torch_utils import misc
+
+from torch_utils import misc, persistence
 
 #----------------------------------------------------------------------------
 # Normalize given tensor to unit magnitude with respect to the given

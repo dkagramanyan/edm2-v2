@@ -8,15 +8,18 @@
 """Reverse-diffusion samplers for EDM2, all operating in the native EDM
 sigma-space on the `net(x, sigma, labels)` denoiser.
 
-The default `edm` sampler is the 2nd-order Heun sampler from the EDM paper
-(identical to the one in `generate_images.edm_sampler`). `euler`, `ddim` and
-`dpm++` are added so the model can be sampled with a few different samplers like
-DiffiT-v2 -- they are inference-only and do not touch the training/update logic.
+The default `dpm++` sampler is DPM-Solver++(2M) in log-sigma space (Lu et al.,
+2022), following the standard k-diffusion formulation. Like `edm` it is 2nd-order
+accurate, but it reaches that order with one denoiser evaluation per step instead
+of two, so it matches Heun's error at roughly half the cost. `edm` is the
+2nd-order Heun sampler from the EDM paper (identical to the one in
+`generate_images.edm_sampler`) and is the only sampler here supporting
+stochasticity, via `S_churn`. All are inference-only and do not touch the
+training/update logic.
 
 DDIM: for the EDM probability-flow ODE the deterministic first-order update is
 exactly the (eta=0) DDIM step, so `ddim` is the first-order deterministic
-sampler. `dpm++` is DPM-Solver++(2M) in log-sigma space (Lu et al., 2022),
-following the standard k-diffusion formulation.
+sampler.
 """
 
 import numpy as np
@@ -104,7 +107,7 @@ ddim_sampler = euler_sampler
 
 def dpmpp_2m_sampler(
     net, noise, labels=None, gnet=None,
-    num_steps=32, sigma_min=0.002, sigma_max=80, rho=7, guidance=1,
+    num_steps=25, sigma_min=0.002, sigma_max=80, rho=7, guidance=1,
     dtype=torch.float32, randn_like=torch.randn_like, **kwargs,
 ):
     denoise = _make_denoise(net, labels, gnet, guidance, dtype)
@@ -140,7 +143,7 @@ _SAMPLERS = {
 }
 
 def sample(net, noise, labels=None, gnet=None, randn_like=torch.randn_like, *,
-           sampler='edm', **sampler_kwargs):
+           sampler='dpm++', **sampler_kwargs):
     """Dispatch to the chosen sampler. `sampler` in SAMPLER_NAMES."""
     if sampler not in _SAMPLERS:
         raise ValueError(f'Unknown sampler {sampler!r}; choose from {SAMPLER_NAMES}')

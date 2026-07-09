@@ -8,15 +8,17 @@
 """Train diffusion models according to the EDM2 recipe from the paper
 "Analyzing and Improving the Training Dynamics of Diffusion Models"."""
 
+import json
 import os
 import socket
-import json
 import warnings
+
 import click
 import torch
+
 import dnnlib
-from torch_utils import distributed as dist
 import training.training_loop
+from torch_utils import distributed as dist
 
 warnings.filterwarnings('ignore', 'You are using `torch.load` with `weights_only=False`')
 
@@ -106,8 +108,8 @@ def setup_training_config(preset='edm2-img512-s', **opts):
     c.combra_metrics = opts.get('combra_metrics', True)
     c.num_fid_samples = opts.get('num_fid_samples', 10000)
     c.combra_ref_count = opts.get('combra_ref_count', 0) or None
-    c.eval_sampler = opts.get('sampler', 'edm')
-    c.eval_num_steps = opts.get('sampling_steps', 32)
+    c.eval_sampler = opts.get('eval_sampler', 'dpm++')
+    c.eval_num_steps = opts.get('eval_sampling_steps', 25)
     c.eval_guidance = opts.get('guidance', 1.0)
     return c
 
@@ -222,11 +224,11 @@ def parse_nimg(s):
 @click.option('--combra-metrics',   'combra_metrics', help='Compute combra generative-quality metrics each snapshot tick', metavar='BOOL', type=bool, default=True, show_default=True)
 @click.option('--num-fid-samples',  help='Fakes generated (all ranks) per combra eval; 0=disable', metavar='INT', type=int, default=10000, show_default=True)
 @click.option('--combra-ref-count', help='Real reference images for combra; 0=whole dataset', metavar='INT', type=int, default=0, show_default=True)
-@click.option('--sampler',          help='Eval-time / snapshot sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='edm', show_default=True)
-@click.option('--sampling-steps',   help='Eval-time sampling steps', metavar='INT',             type=click.IntRange(min=1), default=32, show_default=True)
+@click.option('--eval-sampler',     help='Eval-time / snapshot sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='dpm++', show_default=True)
+@click.option('--eval-sampling-steps', help='Eval-time sampling steps', metavar='INT',          type=click.IntRange(min=1), default=25, show_default=True)
 @click.option('--guidance',         help='Eval-time classifier-free guidance strength', metavar='FLOAT', type=float, default=1.0, show_default=True)
 
-def main(outdir, gpus, snap, save_inference_only, dry_run, **opts):
+def main(**opts):
     """Train diffusion models according to the EDM2 recipe from the paper
     "Analyzing and Improving the Training Dynamics of Diffusion Models".
 
@@ -243,6 +245,25 @@ def main(outdir, gpus, snap, save_inference_only, dry_run, **opts):
     \b
     # To resume training (only if --save-inference-only was False), run again.
     """
+    launch_from_opts(opts)
+
+#----------------------------------------------------------------------------
+
+def launch_from_opts(opts):
+    """Build the run config from a CLI-style opts dict and launch training.
+
+    Shared by the click entry point (``main``) and the Hydra entry point
+    (``train_hydra.py``) so both paths produce identical runs. ``opts`` is a
+    dict keyed by the click option Python names (the same keys click passes to
+    ``main`` as ``**kwargs``).
+    """
+    opts = dict(opts)
+    outdir = opts.pop('outdir')
+    gpus = opts.pop('gpus')
+    snap = opts.pop('snap')
+    save_inference_only = opts.pop('save_inference_only')
+    dry_run = opts.pop('dry_run')
+
     # DiffiT-style knobs mapped onto edm2 intervals.
     if save_inference_only:      # skip the resumable .pt; keep only the .pkl
         opts['checkpoint'] = 0

@@ -7,12 +7,14 @@
 
 """Streaming images and labels from datasets created with dataset_tool.py."""
 
-import os
-import numpy as np
-import zipfile
-import PIL.Image
 import json
+import os
+import zipfile
+
+import numpy as np
+import PIL.Image
 import torch
+
 import dnnlib
 
 try:

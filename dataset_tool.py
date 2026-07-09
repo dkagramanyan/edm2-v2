@@ -7,16 +7,17 @@
 
 """Tool for creating ZIP/PNG based datasets."""
 
-from collections.abc import Iterator
-from dataclasses import dataclass
 import functools
 import io
 import json
 import os
 import re
 import zipfile
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
+
 import click
 import numpy as np
 import PIL.Image

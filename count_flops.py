@@ -5,15 +5,17 @@
 # You should have received a copy of the license along with this
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
+import collections
+import contextlib
 import os
 import pickle
 import re
 import warnings
-import contextlib
-import collections
+
 import click
 import numpy as np
 import torch
+
 import dnnlib
 
 warnings.filterwarnings('ignore', 'You are using `torch.load` with `weights_only=False`')

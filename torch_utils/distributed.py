@@ -8,8 +8,10 @@
 import os
 import re
 import socket
+
 import torch
 import torch.distributed
+
 from . import training_stats
 
 _sync_device = None

@@ -8,14 +8,16 @@
 """Generate random images using the given model."""
 
 import os
+import pickle
 import re
 import warnings
+
 import click
-import tqdm
-import pickle
 import numpy as np
-import torch
 import PIL.Image
+import torch
+import tqdm
+
 import dnnlib
 from torch_utils import distributed as dist
 
@@ -73,7 +75,7 @@ config_presets = {
 # (kept importable here for backward compatibility); `training.samplers.sample`
 # additionally dispatches to euler / ddim / dpm++.
 
-from training.samplers import edm_sampler, sample as sampler_dispatch  # noqa: E402
+from training.samplers import edm_sampler, sample as sampler_dispatch  # noqa: E402, F401
 
 #----------------------------------------------------------------------------
 # Wrapper for torch.Generator that allows specifying a different random seed
@@ -112,7 +114,7 @@ def generate_images(
     encoder_batch_size  = 4,                    # Maximum batch size for the encoder. None = default.
     verbose             = True,                 # Enable status prints?
     device              = torch.device('cuda'), # Which compute device to use.
-    sampler             = 'edm',                # Which sampler to use: edm, euler, ddim, dpm++.
+    sampler             = 'dpm++',              # Which sampler to use: edm, euler, ddim, dpm++.
     **sampler_kwargs,                           # Additional arguments for the sampler function.
 ):
     # Rank 0 goes first.
@@ -229,8 +231,8 @@ def parse_int_list(s):
 @click.option('--class', 'class_idx',       help='Class label  [default: random]', metavar='INT',                   type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                               type=click.IntRange(min=1), default=32, show_default=True)
 
-@click.option('--sampler',                  help='Reverse-diffusion sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='edm', show_default=True)
-@click.option('--steps', 'num_steps',       help='Number of sampling steps', metavar='INT',                         type=click.IntRange(min=1), default=32, show_default=True)
+@click.option('--sampler',                  help='Reverse-diffusion sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='dpm++', show_default=True)
+@click.option('--steps', 'num_steps',       help='Number of sampling steps', metavar='INT',                         type=click.IntRange(min=1), default=25, show_default=True)
 @click.option('--sigma_min',                help='Lowest noise level', metavar='FLOAT',                             type=click.FloatRange(min=0, min_open=True), default=0.002, show_default=True)
 @click.option('--sigma_max',                help='Highest noise level', metavar='FLOAT',                            type=click.FloatRange(min=0, min_open=True), default=80, show_default=True)
 @click.option('--rho',                      help='Time step exponent', metavar='FLOAT',                             type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)

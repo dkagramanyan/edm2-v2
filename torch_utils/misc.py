@@ -5,12 +5,14 @@
 # You should have received a copy of the license along with this
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
-import re
 import contextlib
 import functools
+import re
+import warnings
+
 import numpy as np
 import torch
-import warnings
+
 import dnnlib
 
 #----------------------------------------------------------------------------
@@ -124,8 +126,7 @@ class InfiniteSampler(torch.utils.data.Sampler):
         assert len(dataset) > 0
         assert num_replicas > 0
         assert 0 <= rank < num_replicas
-        warnings.filterwarnings('ignore', '`data_source` argument is not used and will be removed')
-        super().__init__(dataset)
+        super().__init__()
         self.dataset_size = len(dataset)
         self.start_idx = start_idx + rank
         self.stride = num_replicas
@@ -217,8 +218,8 @@ def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
     hooks = [mod.register_forward_pre_hook(pre_hook) for mod in module.modules()]
     hooks += [mod.register_forward_hook(post_hook) for mod in module.modules()]
 
-    # Run module.
-    outputs = module(*inputs)
+    # Run module. The forward hooks above collect what the summary needs.
+    module(*inputs)
     for hook in hooks:
         hook.remove()
 

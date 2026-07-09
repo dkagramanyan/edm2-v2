@@ -9,27 +9,27 @@
 
 import ctypes
 import fnmatch
+import glob
+import hashlib
+import html
 import importlib
 import inspect
-import numpy as np
-import os
-import shutil
-import sys
-import time
-import types
 import io
+import os
 import pickle
 import re
-import requests
-import html
-import hashlib
-import glob
+import shutil
+import sys
 import tempfile
+import time
+import types
 import urllib
 import urllib.parse
 import uuid
+from typing import Any, BinaryIO, Callable, List, Optional, Tuple, Union
 
-from typing import Any, Callable, BinaryIO, List, Tuple, Union, Optional
+import numpy as np
+import requests
 
 # Util classes
 # ------------------------------------------------------------------------------------------
@@ -68,14 +68,20 @@ class Logger(object):
         sys.stdout = self
         sys.stderr = self
 
+    _timestamped_re = re.compile(r'^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]')
+
     def _add_timestamps(self, text: str) -> str:
-        """Prefix each written line with a local system timestamp."""
+        """Prefix each written line with a local system timestamp.
+
+        Lines that already carry one (e.g. anything routed through
+        training.logger, which stamps in its own `_do_log`) are left alone.
+        """
         ts = time.strftime('[%Y-%m-%d %H:%M:%S] ')
         segments = text.split('\n')
         out = []
         for i, seg in enumerate(segments):
             at_start = self._at_line_start if i == 0 else True
-            if at_start and seg:
+            if at_start and seg and not self._timestamped_re.match(seg):
                 out.append(ts)
             out.append(seg)
             if i < len(segments) - 1:

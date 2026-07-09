@@ -7,23 +7,20 @@
 
 """Main training loop."""
 
-import os
-import json
-import time
 import copy
+import json
+import os
 import pickle
-import psutil
+import time
+
 import numpy as np
-import torch
 import PIL.Image
+import psutil
+import torch
+
 import dnnlib
-from torch_utils import distributed as dist
-from torch_utils import training_stats
-from torch_utils import persistence
-from torch_utils import misc
-from training import logger as tblog
-from training import metrics as combra_mod
-from training import samplers
+from torch_utils import distributed as dist, misc, persistence, training_stats
+from training import logger as tblog, metrics as combra_mod, samplers
 
 #----------------------------------------------------------------------------
 # Uncertainty-based loss function (Equations 14,15,16,21) proposed in the
@@ -127,8 +124,8 @@ def training_loop(
     combra_metrics      = True,     # Compute combra generative-quality metrics each snapshot tick.
     num_fid_samples     = 10000,    # Fakes generated (across all ranks) per combra eval. 0 = disable.
     combra_ref_count    = None,     # Real reference images for combra. None = whole training set.
-    eval_sampler        = 'edm',    # Sampler used for eval-time / snapshot generation.
-    eval_num_steps      = 32,       # Sampling steps for eval-time / snapshot generation.
+    eval_sampler        = 'dpm++',  # Sampler used for eval-time / snapshot generation.
+    eval_num_steps      = 25,       # Sampling steps for eval-time / snapshot generation.
     eval_guidance       = 1,        # Classifier-free guidance strength for eval-time generation.
 ):
     # Initialize.
@@ -266,8 +263,8 @@ def training_loop(
             )
             cur_tick += 1
             # DiffiT-style console line (also written to log.txt, mirrored to TB text + stats.jsonl).
+            # tblog stamps the system time on every text event; do not add another here.
             tblog.log(' '.join([
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]",
                 f"tick {cur_tick:<5d}",
                 f"kimg {fields['kimg']:<9.1f}",
                 f"time {dnnlib.util.format_time(fields['time']):<12s}",

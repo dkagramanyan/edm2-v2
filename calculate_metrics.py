@@ -8,18 +8,19 @@
 """Calculate evaluation metrics (FID and FD_DINOv2)."""
 
 import os
-import click
-import tqdm
 import pickle
+
+import click
 import numpy as np
+import PIL.Image
 import scipy.linalg
 import torch
-import PIL.Image
+import tqdm
+
 import dnnlib
-from torch_utils import distributed as dist
-from torch_utils import misc
-from training import dataset
 import generate_images
+from torch_utils import distributed as dist, misc
+from training import dataset
 
 #----------------------------------------------------------------------------
 # Abstract base class for feature detectors.

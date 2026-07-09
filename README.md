@@ -29,7 +29,7 @@ https://arxiv.org/abs/2406.02507
 | **Latent encoding** | dataset pre-encoded to an 8-channel latent zip offline | **inline VAE encode** (DiffiT-style): train latent diffusion straight from a raw-RGB zip, the frozen Stability VAE runs each step — no pre-encode pass. Offline 8-channel latent zips still work and are auto-detected |
 | **Checkpointing** | full resumable `training-state-*.pt` | self-contained inference `network-snapshot-*.pkl` (EMA + encoder) **plus** the resumable `.pt`; `--checkpoint=0` writes **inference-only** (DiffiT `--save-inference-only`) |
 | **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
-| **Samplers** | EDM 2nd-order Heun only | `edm` (Heun, default), `euler`, `ddim`, `dpm++` (DPM-Solver++ 2M), σ-space, **one implementation shared by training-eval, generation and bulk sampling** |
+| **Samplers** | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval, generation and bulk sampling** |
 | **Step-count analysis** | — | `edm2-compare-samplers`: sweep samplers × step counts, score with combra, find the optimal number of sampling steps (metric-vs-steps plateau) |
 | **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points (`edm2-train`, `edm2-gen-images`, `edm2-sample`, `edm2-eval`, `edm2-compare-samplers`, `edm2-prepare-data`, `edm2-download-models`) |
 | **Resolutions** | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets + sbatch for 256/512/1024 |
@@ -150,10 +150,37 @@ sbatch sbatch/train_2h200_1024x1024.sbatch
 | `--combra-metrics / --no-combra-metrics` | on | Inline combra metrics each snapshot tick (all ranks) |
 | `--num-fid-samples` | 10000 | Fakes generated (all ranks) per combra eval; 0 disables |
 | `--combra-ref-count` | 0 (whole set) | Real reference images for combra |
-| `--sampler` | `edm` | Eval-time / snapshot sampler (`edm/euler/ddim/dpm++`) |
-| `--sampling-steps` | 32 | Eval-time sampling steps |
+| `--eval-sampler` | `dpm++` | Eval-time / snapshot sampler (`edm/euler/ddim/dpm++`) |
+| `--eval-sampling-steps` | 25 | Eval-time sampling steps |
 | `--guidance` | 1 | Eval-time classifier-free guidance strength |
 | `-n, --dry-run` | off | Print resolved config and exit |
+
+### Hydra entry point
+
+`train_hydra.py` is a thin wrapper around the same launch path (DiffiT-v2 / san-v2
+style). The click CLI in `train_edm2.py` stays the single source of truth for every
+option and default: the Hydra path introspects it, overlays `configs/config.yaml`
+plus any command-line overrides, and calls the same
+`train_edm2.launch_from_opts(opts)` the click entry point uses — so both paths
+produce identical run configs.
+
+```bash
+python train_hydra.py outdir=./training-runs preset=edm2-img256-s \
+    data=./datasets/imagenet_256x256.zip gpus=2 batch_gpu=64
+```
+
+Override any option by its **Python name** (dashes become underscores; `--cfg` /
+`--preset` is named `preset`):
+
+```bash
+python train_hydra.py outdir=./training-runs preset=edm2-img256-s data=... \
+    gpus=2 batch_gpu=64 combra_metrics=false save_inference_only=true \
+    eval_sampler=edm eval_sampling_steps=32 snap=100
+```
+
+Every option is listed in `configs/config.yaml` so plain `key=value` overrides work
+without Hydra's `+` prefix. A `null` there means "not provided" and leaves the click
+default in place, so the YAML never duplicates — or drifts from — those defaults.
 
 ### Training output
 
@@ -215,10 +242,12 @@ SLURM: `sbatch sbatch/generate_1gpu_{256,512,1024}.sbatch`,
 All samplers run in EDM σ-space on the same `net(x, σ, labels)` denoiser and honor
 `--guidance`/`--gnet`:
 
-- **`edm`** — 2nd-order Heun (EDM paper, default; supports stochasticity via `S_churn`).
+- **`dpm++`** — DPM-Solver++(2M) in log-σ space. **The default**, at 25 steps. 2nd-order
+  accurate at one denoiser evaluation per step (Heun needs two), so it is the cheapest
+  route to near-converged quality: 25 evaluations vs 63 for the old `edm`-at-32 default.
+- **`edm`** — 2nd-order Heun (EDM paper); the only sampler supporting stochasticity, via `S_churn`.
 - **`euler`** — 1st-order deterministic Euler.
 - **`ddim`** — deterministic DDIM (η=0), which is the first-order EDM step (≡ `euler`).
-- **`dpm++`** — DPM-Solver++(2M) in log-σ space, fast (~25 steps).
 
 ## Finding the optimal number of sampling steps
 
