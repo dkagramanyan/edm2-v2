@@ -113,7 +113,9 @@ class CheckpointIO:
     def load(self, pt_path, verbose=True):
         if verbose:
             print0(f'Loading {pt_path} ... ', end='', flush=True)
-        data = torch.load(pt_path, map_location=torch.device('cpu'))
+        # weights_only=False: the checkpoint holds dnnlib.EasyDict state, which the
+        # torch>=2.6 safe unpickler rejects. It is a file we wrote ourselves.
+        data = torch.load(pt_path, map_location=torch.device('cpu'), weights_only=False)
         for name, obj in self._state_objs.items():
             if obj is None:
                 pass

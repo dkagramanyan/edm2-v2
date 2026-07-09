@@ -17,6 +17,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `object.__init__` and rejects the argument (`TypeError: object.__init__() takes
   exactly one argument`). Dropped the argument, matching `san-v2` and `StyleSwin`.
   (`torch_utils/misc.py`)
+- **Resume was impossible on torch >= 2.6.** `CheckpointIO.load` called
+  `torch.load(...)` without `weights_only=False`, and the safe unpickler rejects the
+  `dnnlib.EasyDict` state the checkpoint holds (`UnpicklingError: Unsupported global`).
+  Loading a `training-state-*.pt` therefore always failed. (`torch_utils/distributed.py`)
 - **Log lines carried two or three stacked timestamps.** `dnnlib.util.Logger`,
   `logger._do_log` and the hand-built tick line each prefixed their own. The stamp is
   now applied once: `dnnlib.util.Logger` skips lines that already carry one.
@@ -45,6 +49,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   needed two, so the default eval costs 25 network evaluations instead of 63.
   Verified against the analytic Gaussian probability-flow ODE solution: empirical
   convergence order 2.09 (Heun: 2.06; euler/ddim: 0.99).
+- **Per-run output directories**, DiffiT-style: training now writes to
+  `<outdir>/<id:05d>-<preset>-gpus<N>-batch<B>` instead of straight into `--outdir`
+  (which is what the README already claimed). Re-running the same command reuses the
+  matching directory, preserving edm2's implicit "run it again to resume" behaviour;
+  a different preset / GPU count / batch size gets a fresh number. The directory is
+  resolved once in the parent process so spawned ranks cannot race to number one
+  each. (`train_edm2.py`)
 - **`--sampler` / `--sampling-steps` renamed to `--eval-sampler` /
   `--eval-sampling-steps`** in `train_edm2.py`, matching DiffiT-v2's training CLI. The
   generation scripts (`generate_images.py`, `sample_images.py`) keep `--sampler` /

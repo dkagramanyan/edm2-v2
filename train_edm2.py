@@ -10,6 +10,7 @@
 
 import json
 import os
+import re
 import socket
 import warnings
 
@@ -129,6 +130,33 @@ def print_training_config(run_dir, c, num_gpus):
     dist.print0(f'Total batch size:        {c.batch_size}')
     dist.print0(f'Mixed-precision:         {c.network_kwargs.use_fp16}')
     dist.print0()
+
+#----------------------------------------------------------------------------
+# Run directory naming, DiffiT-style: <outdir>/<00000>-<preset>-gpus<N>-batch<B>.
+
+def make_run_desc(preset, num_gpus, batch_size):
+    return f'{preset}-gpus{num_gpus}-batch{batch_size}'
+
+def make_run_dir(outdir, desc):
+    """Pick `<outdir>/<id:05d>-<desc>`, reusing an existing run with the same desc.
+
+    Unlike DiffiT (which has an explicit --resume), edm2 resumes by loading the
+    latest `training-state-*.pt` out of the run directory. So an existing
+    `<id>-<desc>` must be reused rather than freshly numbered, or re-running the
+    same command would silently restart training from scratch.
+    """
+    prev_run_dirs = []
+    if os.path.isdir(outdir):
+        prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
+
+    matching = [x for x in prev_run_dirs if re.fullmatch(r'\d{5}-' + re.escape(desc), x)]
+    if matching:
+        return os.path.join(outdir, max(matching))  # resume the highest-numbered match
+
+    prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
+    prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
+    cur_run_id = max(prev_run_ids, default=-1) + 1
+    return os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
 
 #----------------------------------------------------------------------------
 # Launch training.
@@ -272,7 +300,12 @@ def launch_from_opts(opts):
 
     print('Setting up training config...')
     c = setup_training_config(**opts)
-    print_training_config(run_dir=outdir, c=c, num_gpus=gpus)
+
+    # Resolve the run directory here, in the parent, so every spawned rank is
+    # handed the same path instead of racing to number one for itself.
+    desc = make_run_desc(opts['preset'], gpus, c.batch_size)
+    run_dir = make_run_dir(outdir, desc)
+    print_training_config(run_dir=run_dir, c=c, num_gpus=gpus)
     if dry_run:
         print('Dry run; exiting.')
         return
@@ -280,9 +313,9 @@ def launch_from_opts(opts):
     torch.multiprocessing.set_start_method('spawn', force=True)
     master_port = _free_port()
     if gpus == 1:
-        subprocess_fn(rank=0, c=c, run_dir=outdir, num_gpus=1, master_port=master_port)
+        subprocess_fn(rank=0, c=c, run_dir=run_dir, num_gpus=1, master_port=master_port)
     else:
-        torch.multiprocessing.spawn(subprocess_fn, args=(c, outdir, gpus, master_port), nprocs=gpus)
+        torch.multiprocessing.spawn(subprocess_fn, args=(c, run_dir, gpus, master_port), nprocs=gpus)
 
 #----------------------------------------------------------------------------
 

@@ -185,7 +185,7 @@ default in place, so the YAML never duplicates — or drifts from — those defa
 ### Training output
 
 ```
-training-runs/00000-.../
+training-runs/00000-edm2-img256-s-gpus2-batch2048/
 ├── training_options.json   # all hyperparameters
 ├── log.txt                 # human-readable log (rank 0)
 ├── log-rank001.txt …       # per-rank logs
@@ -199,6 +199,13 @@ training-runs/00000-.../
 ├── network-snapshot-*.pkl  # EMA weights (inference artifact)
 └── training-state-*.pt     # full resumable state
 ```
+
+Each run gets its own directory under `--outdir`, named
+`<id:05d>-<preset>-gpus<N>-batch<B>` (DiffiT-style). **Re-running the same command
+reuses the matching directory** rather than numbering a new one — that is how edm2
+resumes, since it picks up the latest `training-state-*.pt` from the run directory.
+Changing the preset, GPU count or batch size yields a different name and therefore a
+fresh run.
 
 Monitor with `tensorboard --logdir training-runs`.
 
