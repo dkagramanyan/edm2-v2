@@ -106,7 +106,12 @@ class CheckpointIO:
             else:
                 raise ValueError(f'Invalid state object of type {type(obj).__name__}')
         if get_rank() == 0:
-            torch.save(data, pt_path)
+            # Atomic write: the single overwriting `network-snapshot-latest.pt` /
+            # `best_model.pt` are the sole resume points, so a crash mid-save must
+            # not truncate them. Write to a temp file, then os.replace().
+            tmp_path = pt_path + '.tmp'
+            torch.save(data, tmp_path)
+            os.replace(tmp_path, pt_path)
         if verbose:
             print0('done')
 
@@ -135,6 +140,15 @@ class CheckpointIO:
             print0('done')
 
     def load_latest(self, run_dir, pattern=r'training-state-(\d+).pt', verbose=True):
+        # Prefer the rolling full checkpoint written every snapshot tick, then
+        # best_model.pt (the anchor that always exists, incl. under
+        # --save-inference-only), then the legacy numbered training-state-<nimg>.pt
+        # so run dirs produced before this scheme still resume.
+        for name in ('network-snapshot-latest.pt', 'best_model.pt'):
+            path = os.path.join(run_dir, name)
+            if os.path.isfile(path):
+                self.load(path, verbose=verbose)
+                return path
         fnames = [entry.name for entry in os.scandir(run_dir) if entry.is_file() and re.fullmatch(pattern, entry.name)]
         if len(fnames) == 0:
             return None

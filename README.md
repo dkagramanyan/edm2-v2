@@ -27,7 +27,7 @@ https://arxiv.org/abs/2406.02507
 |---|---|---|
 | **Logging** | single `Status:` line + `stats.jsonl` | DiffiT-style logger: `log.txt`, `progress.csv`, `progress.json`, `stats.jsonl`, TensorBoard (`events.out.tfevents.*`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids. **Every scalar** (losses, LR, timing, resources, combra metrics, tick) **and the image grids are mirrored to TensorBoard** |
 | **Latent encoding** | dataset pre-encoded to an 8-channel latent zip offline | **inline VAE encode** (DiffiT-style): train latent diffusion straight from a raw-RGB zip, the frozen Stability VAE runs each step — no pre-encode pass. Offline 8-channel latent zips still work and are auto-detected |
-| **Checkpointing** | full resumable `training-state-*.pt` | self-contained inference `network-snapshot-*.pkl` (EMA + encoder) **plus** the resumable `.pt`; `--checkpoint=0` writes **inference-only** (DiffiT `--save-inference-only`) |
+| **Checkpointing** | full resumable `training-state-*.pt` (one per tick) | best-of-both, each snapshot tick: self-contained inference `network-snapshot-*.pkl` (EMA + encoder) **accumulate as history** (pruned to the newest `--snapshot-keep-last`, default 3), the big resumable state **overwrites a single `network-snapshot-latest.pt`** (atomic, never accumulates), and **`best_model.pt`** keeps the lowest-combra-FID full checkpoint. `--save-inference-only` skips `network-snapshot-latest.pt` (you still resume from `best_model.pt`) |
 | **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
 | **Samplers** | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval, generation and bulk sampling** |
 | **Step-count analysis** | — | `edm2-compare-samplers`: sweep samplers × step counts, score with combra, find the optimal number of sampling steps (metric-vs-steps plateau) |
@@ -125,8 +125,9 @@ torchrun --standalone --nproc_per_node=2 train_edm2.py \
     --data=datasets/imagenet_1024x1024.zip --batch-gpu=8
 ```
 
-To **resume**, run the exact same command again — training auto-resumes from the
-latest `training-state-*.pt` in `--outdir`.
+To **resume**, run the exact same command again — training auto-resumes from
+`network-snapshot-latest.pt` in the run directory, falling back to `best_model.pt`
+(and then to any legacy numbered `training-state-*.pt`) if it is absent.
 
 Ready-made SLURM scripts (H200) live in `sbatch/`:
 
@@ -146,7 +147,9 @@ sbatch sbatch/train_2h200_1024x1024.sbatch
 | `--cond` | `True` | Train class-conditional model |
 | `--batch-gpu` | auto | Per-GPU batch size (global batch reached via accumulation) |
 | `--fp16` | `True` | Mixed-precision training |
-| `--status` / `--snapshot` / `--checkpoint` | 128Ki / 8Mi / 128Mi | Status / snapshot / checkpoint intervals (images) |
+| `--status` / `--snapshot` | 128Ki / 8Mi | Status / snapshot intervals (images) |
+| `--snapshot-keep-last` | 3 | Newest inference `.pkl` kept (0 = keep all); never touches `best_model.pt` / latest |
+| `--save-inference-only` | `False` | Skip `network-snapshot-latest.pt`; still writes `.pkl` + `best_model.pt` for resume |
 | `--combra-metrics / --no-combra-metrics` | on | Inline combra metrics each snapshot tick (all ranks) |
 | `--num-fid-samples` | 10000 | Fakes generated (all ranks) per combra eval; 0 disables |
 | `--combra-ref-count` | 0 (whole set) | Real reference images for combra |
@@ -196,14 +199,15 @@ training-runs/00000-edm2-img256-s-gpus2-batch2048/
 ├── reals.png               # real image grid
 ├── fakes_init.png          # pre-training samples
 ├── fakes000200.png …       # samples per snapshot tick
-├── network-snapshot-*.pkl  # EMA weights (inference artifact)
-└── training-state-*.pt     # full resumable state
+├── network-snapshot-*.pkl    # EMA + encoder (inference artifact; newest --snapshot-keep-last kept)
+├── network-snapshot-latest.pt  # full resumable state (single file, overwritten each tick)
+└── best_model.pt             # full resumable state at the lowest combra FID
 ```
 
 Each run gets its own directory under `--outdir`, named
 `<id:05d>-<preset>-gpus<N>-batch<B>` (DiffiT-style). **Re-running the same command
 reuses the matching directory** rather than numbering a new one — that is how edm2
-resumes, since it picks up the latest `training-state-*.pt` from the run directory.
+resumes, since it picks up `network-snapshot-latest.pt` from the run directory.
 Changing the preset, GPU count or batch size yields a different name and therefore a
 fresh run.
 

@@ -3,6 +3,35 @@
 All notable changes to this fork (`edm2`) are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- **Best-of-both checkpointing (DiffiT-v2 scheme).** Every snapshot tick now writes
+  three things instead of accumulating one full checkpoint per tick:
+  - the small self-contained inference `network-snapshot-<kimg>.pkl` (EMA + encoder)
+    **accumulate as history**, pruned to the newest `--snapshot-keep-last` (default
+    3; `0` keeps all);
+  - a single full `network-snapshot-latest.pt` is **overwritten in place** (atomic
+    temp-file + `os.replace`, so a crash mid-save cannot destroy the resume point),
+    skipped under `--save-inference-only`;
+  - `best_model.pt` keeps the full checkpoint of the lowest `combra_fid10k` tick and
+    is written in **both** modes, so a full resume anchor always exists.
+
+  `load_latest` now resumes from `network-snapshot-latest.pt`, then `best_model.pt`,
+  then the legacy numbered `training-state-*.pt` (older runs still resume).
+  (`training/training_loop.py`, `torch_utils/distributed.py`)
+
+### Removed
+- `--checkpoint` interval flag and `checkpoint_nimg` (the full checkpoint now
+  follows the snapshot cadence). `--save-inference-only` no longer maps to
+  `--checkpoint=0`; it directly gates `network-snapshot-latest.pt`.
+  (`train_edm2.py`, `configs/config.yaml`)
+
+### Added
+- `--snapshot-keep-last INT` (default 3) to bound inference-snapshot disk usage.
+- Training sbatches (`sbatch/train_2h200_*.sbatch`) drop `--save-inference-only`
+  so runs keep the resumable state by default.
+
 ## [2.1.0] — 2026-07-09
 
 ### Fixed

@@ -43,7 +43,7 @@ bench: null
 status: null            # accepts the CLI's 128Ki / 8Mi / 128Mi suffixes
 snapshot: null
 snap: null
-checkpoint: null
+snapshot_keep_last: null
 save_inference_only: null
 seed: null
 dry_run: null

@@ -102,7 +102,8 @@ def setup_training_config(preset='edm2-img512-s', **opts):
     # I/O-related options.
     c.status_nimg = opts.get('status', 0) or None
     c.snapshot_nimg = opts.get('snapshot', 0) or None
-    c.checkpoint_nimg = opts.get('checkpoint', 0) or None
+    c.snapshot_keep_last = opts.get('snapshot_keep_last', 3)
+    c.save_inference_only = opts.get('save_inference_only', False)
     c.seed = opts.get('seed', 0)
 
     # Inline evaluation (combra metrics + eval-time sampler), DiffiT-v2 style.
@@ -140,10 +141,10 @@ def make_run_desc(preset, num_gpus, batch_size):
 def make_run_dir(outdir, desc):
     """Pick `<outdir>/<id:05d>-<desc>`, reusing an existing run with the same desc.
 
-    Unlike DiffiT (which has an explicit --resume), edm2 resumes by loading the
-    latest `training-state-*.pt` out of the run directory. So an existing
-    `<id>-<desc>` must be reused rather than freshly numbered, or re-running the
-    same command would silently restart training from scratch.
+    Unlike DiffiT (which has an explicit --resume), edm2 resumes by loading
+    `network-snapshot-latest.pt` (or `best_model.pt`) out of the run directory. So
+    an existing `<id>-<desc>` must be reused rather than freshly numbered, or
+    re-running the same command would silently restart training from scratch.
     """
     prev_run_dirs = []
     if os.path.isdir(outdir):
@@ -243,8 +244,8 @@ def parse_nimg(s):
 @click.option('--status',           help='Interval of status prints', metavar='NIMG',           type=parse_nimg, default='128Ki', show_default=True)
 @click.option('--snapshot',         help='Interval of network snapshots', metavar='NIMG',       type=parse_nimg, default='8Mi', show_default=True)
 @click.option('--snap',             help='Snapshots every N status ticks (overrides --snapshot)', metavar='TICKS', type=click.IntRange(min=1), default=None)
-@click.option('--checkpoint',       help='Interval of training checkpoints', metavar='NIMG',    type=parse_nimg, default='128Mi', show_default=True)
-@click.option('--save-inference-only', 'save_inference_only', help='Save ONLY the inference snapshot (.pkl); skip the resumable training-state (.pt)', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--snapshot-keep-last', 'snapshot_keep_last', help='Keep only the N newest per-tick inference .pkl (0 = keep all); never affects best_model.pt / latest / final', metavar='INT', type=click.IntRange(min=0), default=3, show_default=True)
+@click.option('--save-inference-only', 'save_inference_only', help='Skip the rolling full network-snapshot-latest.pt; still writes per-tick inference .pkl and best_model.pt (full) for resume', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--seed',             help='Random seed', metavar='INT',                          type=int, default=0, show_default=True)
 @click.option('-n', '--dry-run',    help='Print training options and exit',                     is_flag=True)
 
@@ -268,10 +269,17 @@ def main(**opts):
         --cfg=edm2-img256-s \\
         --data=./datasets/imagenet_256x256.zip \\
         --gpus=2 --batch-gpu=64 \\
-        --combra-metrics True --save-inference-only True --snap 100
+        --combra-metrics True --snap 100
 
     \b
-    # To resume training (only if --save-inference-only was False), run again.
+    # Best-of-both by default, each snapshot tick: small self-contained inference
+    # network-snapshot-<kimg>.pkl accumulate as history (pruned to the newest
+    # --snapshot-keep-last, default 3); a single full network-snapshot-latest.pt
+    # is overwritten in place for resume; and best_model.pt keeps the lowest-FID
+    # full checkpoint. --save-inference-only skips network-snapshot-latest.pt
+    # (best_model.pt still lets you resume).
+    #
+    # To resume, run the exact same command again.
     """
     launch_from_opts(opts)
 
@@ -289,12 +297,10 @@ def launch_from_opts(opts):
     outdir = opts.pop('outdir')
     gpus = opts.pop('gpus')
     snap = opts.pop('snap')
-    save_inference_only = opts.pop('save_inference_only')
     dry_run = opts.pop('dry_run')
 
-    # DiffiT-style knobs mapped onto edm2 intervals.
-    if save_inference_only:      # skip the resumable .pt; keep only the .pkl
-        opts['checkpoint'] = 0
+    # DiffiT-style knobs mapped onto edm2 intervals. save_inference_only and
+    # snapshot_keep_last are left in opts and consumed by setup_training_config.
     if snap is not None:         # snapshot every N status ticks
         opts['snapshot'] = snap * opts['status']
 

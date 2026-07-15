@@ -39,7 +39,6 @@ edm2-train \
     --gpus=2 \
     --batch-gpu=32 \
     --combra-metrics True \
-    --save-inference-only True \
     --snap 100 \
     --eval-sampler=dpm++ \
     --eval-sampling-steps=25

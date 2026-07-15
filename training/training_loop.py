@@ -8,9 +8,11 @@
 """Main training loop."""
 
 import copy
+import glob
 import json
 import os
 import pickle
+import re
 import time
 
 import numpy as np
@@ -21,6 +23,30 @@ import torch
 import dnnlib
 from torch_utils import distributed as dist, misc, persistence, training_stats
 from training import logger as tblog, metrics as combra_mod, samplers
+
+#----------------------------------------------------------------------------
+# Delete all but the `keep_last` newest per-tick inference snapshots so the .pkl
+# history stays disk-bounded. `keep_last <= 0` keeps everything. Matches ONLY the
+# `network-snapshot-<kimg>*.pkl` history and prunes by distinct kimg (a phema run
+# writes several suffixed .pkl per tick), so the rolling `network-snapshot-latest.pt`,
+# `best_model.pt` and any `network-snapshot-final*` are never touched.
+
+def prune_inference_snapshots(run_dir, keep_last):
+    if keep_last <= 0:
+        return
+    kimg_re = re.compile(r'network-snapshot-(\d+).*\.pkl$')
+    snaps = []
+    for path in glob.glob(os.path.join(run_dir, 'network-snapshot-*.pkl')):
+        m = kimg_re.search(os.path.basename(path))
+        if m is not None:
+            snaps.append((int(m.group(1)), path))
+    keep = set(sorted({kimg for kimg, _ in snaps})[-keep_last:])
+    for kimg, path in snaps:
+        if kimg not in keep:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 #----------------------------------------------------------------------------
 # Uncertainty-based loss function (Equations 14,15,16,21) proposed in the
@@ -114,7 +140,8 @@ def training_loop(
     slice_nimg          = None,     # Train for a maximum of N training images in one invocation. None = no limit.
     status_nimg         = 128<<10,  # Report status every N training images. None = disable.
     snapshot_nimg       = 8<<20,    # Save network snapshot every N training images. None = disable.
-    checkpoint_nimg     = 128<<20,  # Save state checkpoint every N training images. None = disable.
+    snapshot_keep_last  = 3,        # Keep only the N newest per-tick inference .pkl (0 = keep all).
+    save_inference_only = False,    # Skip the rolling full network-snapshot-latest.pt; best_model.pt still saved.
 
     loss_scaling        = 1,        # Loss scaling factor for reducing FP16 under/overflows.
     force_finite        = True,     # Get rid of NaN/Inf gradients before feeding them to the optimizer.
@@ -146,7 +173,6 @@ def training_loop(
     assert slice_nimg is None or slice_nimg % batch_size == 0
     assert status_nimg is None or status_nimg % batch_size == 0
     assert snapshot_nimg is None or (snapshot_nimg % batch_size == 0 and snapshot_nimg % 1024 == 0)
-    assert checkpoint_nimg is None or (checkpoint_nimg % batch_size == 0 and checkpoint_nimg % 1024 == 0)
 
     # Setup dataset, encoder, and network.
     dist.print0('Loading dataset...')
@@ -181,7 +207,7 @@ def training_loop(
     checkpoint.load_latest(run_dir)
     stop_at_nimg = total_nimg
     if slice_nimg is not None:
-        granularity = checkpoint_nimg if checkpoint_nimg is not None else snapshot_nimg if snapshot_nimg is not None else batch_size
+        granularity = snapshot_nimg if snapshot_nimg is not None else batch_size
         slice_end_nimg = (state.cur_nimg + slice_nimg) // granularity * granularity # round down
         stop_at_nimg = min(stop_at_nimg, slice_end_nimg)
     assert stop_at_nimg > state.cur_nimg
@@ -242,6 +268,8 @@ def training_loop(
     cumulative_training_time = 0
     start_nimg = state.cur_nimg
     cur_tick = 0
+    stats_metrics = None            # latest combra metrics dict (rank 0); drives best_model.pt
+    best_fid = float('inf')         # lowest combra_fid10k seen so far
     while True:
         done = (state.cur_nimg >= stop_at_nimg)
 
@@ -342,8 +370,16 @@ def training_loop(
                     sw.flush()
                 net.train()
 
-        # Save network snapshot.
-        if snapshot_nimg is not None and state.cur_nimg % snapshot_nimg == 0 and (state.cur_nimg != start_nimg or start_nimg == 0) and dist.get_rank() == 0:
+        # Save checkpoints. Best-of-both: the small self-contained inference .pkl
+        # accumulate as history (pruned to --snapshot-keep-last), while the big
+        # resumable state never accumulates -- a single rolling
+        # network-snapshot-latest.pt (overwritten every snapshot tick, skipped
+        # under --save-inference-only) plus best_model.pt, refreshed only when
+        # combra FID improves, so a full resume anchor always exists.
+        if at_snapshot:
+            misc.check_ddp_consistency(net)  # collective: must run on every rank
+        if at_snapshot and dist.get_rank() == 0:
+            # 1) Small inference snapshot(s) (EMA + encoder), then prune history.
             ema_list = ema.get() if ema is not None else optimizer.get_ema(net) if hasattr(optimizer, 'get_ema') else net
             ema_list = ema_list if isinstance(ema_list, list) else [(ema_list, '')]
             for ema_net, ema_suffix in ema_list:
@@ -355,11 +391,20 @@ def training_loop(
                     pickle.dump(data, f)
                 dist.print0('done')
                 del data # conserve memory
+            prune_inference_snapshots(run_dir, snapshot_keep_last)
 
-        # Save state checkpoint.
-        if checkpoint_nimg is not None and (done or state.cur_nimg % checkpoint_nimg == 0) and state.cur_nimg != start_nimg:
-            checkpoint.save(os.path.join(run_dir, f'training-state-{state.cur_nimg//1000:07d}.pt'))
-            misc.check_ddp_consistency(net)
+            # 2) Rolling full checkpoint for resume (overwrite in place, atomic).
+            #    Skipped entirely under --save-inference-only.
+            if not save_inference_only:
+                checkpoint.save(os.path.join(run_dir, 'network-snapshot-latest.pt'))
+
+            # 3) best_model.pt: full checkpoint of the lowest combra-FID tick.
+            #    Written in both modes so a full resume anchor always exists.
+            cur_fid = stats_metrics.get('combra_fid10k') if stats_metrics else None
+            if cur_fid is not None and np.isfinite(cur_fid) and cur_fid < best_fid:
+                best_fid = cur_fid
+                dist.print0(f'New best combra_fid10k {cur_fid:.4f} -> saving best_model.pt')
+                checkpoint.save(os.path.join(run_dir, 'best_model.pt'))
 
         # Done?
         if done:
