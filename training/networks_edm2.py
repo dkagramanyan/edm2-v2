@@ -277,7 +277,8 @@ class Precond(torch.nn.Module):
         img_resolution,         # Image resolution.
         img_channels,           # Image channels.
         label_dim,              # Class label dimensionality. 0 = unconditional.
-        use_fp16        = True, # Run the model at FP16 precision?
+        use_fp16        = True, # Run the model in reduced precision (see mixed_precision_dtype)?
+        mixed_precision_dtype = 'fp16', # Reduced-precision dtype when use_fp16: 'fp16' or 'bf16'.
         sigma_data      = 0.5,  # Expected standard deviation of the training data.
         logvar_channels = 128,  # Intermediate dimensionality for uncertainty estimation.
         **unet_kwargs,          # Keyword arguments for UNet.
@@ -287,6 +288,7 @@ class Precond(torch.nn.Module):
         self.img_channels = img_channels
         self.label_dim = label_dim
         self.use_fp16 = use_fp16
+        self.mixed_precision_dtype = mixed_precision_dtype
         self.sigma_data = sigma_data
         self.unet = UNet(img_resolution=img_resolution, img_channels=img_channels, label_dim=label_dim, **unet_kwargs)
         self.logvar_fourier = MPFourier(logvar_channels)
@@ -296,7 +298,8 @@ class Precond(torch.nn.Module):
         x = x.to(torch.float32)
         sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
         class_labels = None if self.label_dim == 0 else torch.zeros([1, self.label_dim], device=x.device) if class_labels is None else class_labels.to(torch.float32).reshape(-1, self.label_dim)
-        dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
+        reduced = {'fp16': torch.float16, 'bf16': torch.bfloat16}.get(getattr(self, 'mixed_precision_dtype', 'fp16'), torch.float16)
+        dtype = reduced if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
 
         # Preconditioning weights.
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)

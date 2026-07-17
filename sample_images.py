@@ -5,12 +5,14 @@
 # You should have received a copy of the license along with this
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
-"""Bulk-sample a trained EDM2 model into a single ``.npz`` of uint8 NHWC images
-for FID-style evaluation, distributed across ranks with ``torchrun``.
+"""[legacy] Bulk-sample a trained EDM2 model into a single ``.npz`` of uint8 NHWC
+images for the upstream-paper FID protocol. Outside the v2 generation contract
+(§11): the WC-Co workflow uses ``edm2-gen-images`` HDF5 output instead. Kept for
+reproducing the upstream ImageNet numbers; carries no contract guarantees.
 
 Example:
     torchrun --standalone --nproc_per_node=4 sample_images.py \\
-        --net=training-runs/00000-.../network-snapshot-....pkl \\
+        --net=run/00000-.../edm2-snapshot-002000-0.100-inference.pt \\
         --outdir=samples/512 --num-samples=50000 --batch=16 --sampler=dpm++ --steps=25
 """
 

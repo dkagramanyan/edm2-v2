@@ -1,3 +1,15 @@
+# Run outputs and datasets (never committed).
+runs/
+training-runs/
+datasets/
+generated/
+logs/
+*.log
 
+# Python.
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/

@@ -63,7 +63,7 @@ def is_image_ext(fname: Union[str, Path]) -> bool:
 
 #----------------------------------------------------------------------------
 
-def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, Iterator[ImageEntry]]:
+def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, Iterator[ImageEntry], Optional[list]]:
     input_images = []
     def _recurse_dirs(root: str): # workaround Path().rglob() slowness
         with os.scandir(root) as it:
@@ -80,19 +80,25 @@ def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, It
 
     # Load labels.
     labels = dict()
+    class_names = None
     meta_fname = os.path.join(source_dir, 'dataset.json')
     if os.path.isfile(meta_fname):
         with open(meta_fname, 'r') as file:
-            data = json.load(file)['labels']
+            meta = json.load(file)
+            data = meta['labels']
             if data is not None:
                 labels = {x[0]: x[1] for x in data}
+            class_names = meta.get('class_names')
 
     # No labels available => determine from top-level directory names.
     if len(labels) == 0:
         toplevel_names = {arch_fname: arch_fname.split('/')[0] if '/' in arch_fname else '' for arch_fname in arch_fnames.values()}
-        toplevel_indices = {toplevel_name: idx for idx, toplevel_name in enumerate(sorted(set(toplevel_names.values())))}
+        # Rule 1 (§5): integer label = index of the class folder in sorted() order.
+        sorted_names = sorted(set(toplevel_names.values()))
+        toplevel_indices = {toplevel_name: idx for idx, toplevel_name in enumerate(sorted_names)}
         if len(toplevel_indices) > 1:
             labels = {arch_fname: toplevel_indices[toplevel_name] for arch_fname, toplevel_name in toplevel_names.items()}
+            class_names = sorted_names
 
     def iterate_images():
         for idx, fname in enumerate(input_images):
@@ -100,22 +106,25 @@ def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, It
             yield ImageEntry(img=img, label=labels.get(arch_fnames[fname]))
             if idx >= max_idx - 1:
                 break
-    return max_idx, iterate_images()
+    return max_idx, iterate_images(), class_names
 
 #----------------------------------------------------------------------------
 
-def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[ImageEntry]]:
+def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[ImageEntry], Optional[list]]:
     with zipfile.ZipFile(source, mode='r') as z:
         input_images = [str(f) for f in sorted(z.namelist()) if is_image_ext(f)]
         max_idx = maybe_min(len(input_images), max_images)
 
         # Load labels.
         labels = dict()
+        class_names = None
         if 'dataset.json' in z.namelist():
             with z.open('dataset.json', 'r') as file:
-                data = json.load(file)['labels']
+                meta = json.load(file)
+                data = meta['labels']
                 if data is not None:
                     labels = {x[0]: x[1] for x in data}
+                class_names = meta.get('class_names')
 
     def iterate_images():
         with zipfile.ZipFile(source, mode='r') as z:
@@ -125,7 +134,7 @@ def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[
                 yield ImageEntry(img=img, label=labels.get(fname))
                 if idx >= max_idx - 1:
                     break
-    return max_idx, iterate_images()
+    return max_idx, iterate_images(), class_names
 
 #----------------------------------------------------------------------------
 
@@ -208,6 +217,8 @@ def make_transform(
 #----------------------------------------------------------------------------
 
 def open_dataset(source, *, max_images: Optional[int]):
+    """Returns (num_files, image_iterator, class_names). class_names is index-aligned
+    or None when the source carries no per-class name information (§5)."""
     if os.path.isdir(source):
         return open_image_folder(source, max_images=max_images)
     elif os.path.isfile(source):
@@ -332,7 +343,7 @@ def convert(
     if dest == '':
         raise click.ClickException('--dest output filename or directory must not be an empty string')
 
-    num_files, input_iter = open_dataset(source, max_images=max_images)
+    num_files, input_iter, class_names = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
     transform_image = make_transform(transform, *resolution if resolution is not None else (None, None))
     dataset_attrs = None
@@ -370,9 +381,20 @@ def convert(
         save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
         labels.append([archive_fname, image.label] if image.label is not None else None)
 
-    metadata = {'labels': labels if all(x is not None for x in labels) else None}
+    metadata = _dataset_metadata(labels, class_names)
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
+
+#----------------------------------------------------------------------------
+# Assemble the dataset.json payload. class_names (§5) is index-aligned and written
+# whenever the source provides it, so combra can match generated images to grain
+# classes by name rather than by fragile integer conventions.
+
+def _dataset_metadata(labels, class_names):
+    meta = {'labels': labels if all(x is not None for x in labels) else None}
+    if class_names is not None:
+        meta['class_names'] = list(class_names)
+    return meta
 
 #----------------------------------------------------------------------------
 
@@ -394,7 +416,7 @@ def encode(
         raise click.ClickException('--dest output filename or directory must not be an empty string')
 
     vae = StabilityVAEEncoder(vae_name=model_url, batch_size=1)
-    num_files, input_iter = open_dataset(source, max_images=max_images)
+    num_files, input_iter, class_names = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
     labels = []
 
@@ -409,7 +431,7 @@ def encode(
         save_bytes(os.path.join(archive_root_dir, archive_fname), f.getvalue())
         labels.append([archive_fname, image.label] if image.label is not None else None)
 
-    metadata = {'labels': labels if all(x is not None for x in labels) else None}
+    metadata = _dataset_metadata(labels, class_names)
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
 
@@ -433,7 +455,7 @@ def decode(
         raise click.ClickException('--dest output filename or directory must not be an empty string')
 
     vae = StabilityVAEEncoder(vae_name=model_url, batch_size=1)
-    num_files, input_iter = open_dataset(source, max_images=max_images)
+    num_files, input_iter, class_names = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
     labels = []
 
@@ -451,7 +473,7 @@ def decode(
         save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
         labels.append([archive_fname, image.label] if image.label is not None else None)
 
-    metadata = {'labels': labels if all(x is not None for x in labels) else None}
+    metadata = _dataset_metadata(labels, class_names)
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
 

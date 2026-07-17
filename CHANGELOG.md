@@ -3,34 +3,68 @@
 All notable changes to this fork (`edm2`) are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [3.0.0] — 2026-07-17
+
+Conformance with the **v2 model-API convention** documented in `wc_cv`
+(`docs/examples/models_api_proposal.md`). This is a breaking release: interrupted
+runs can no longer be resumed, the checkpoint format changed from pickled modules to
+`.pt` state dicts, and several CLI flags were renamed or removed.
 
 ### Changed
-- **Best-of-both checkpointing (DiffiT-v2 scheme).** Every snapshot tick now writes
-  three things instead of accumulating one full checkpoint per tick:
-  - the small self-contained inference `network-snapshot-<kimg>.pkl` (EMA + encoder)
-    **accumulate as history**, pruned to the newest `--snapshot-keep-last` (default
-    3; `0` keeps all);
-  - a single full `network-snapshot-latest.pt` is **overwritten in place** (atomic
-    temp-file + `os.replace`, so a crash mid-save cannot destroy the resume point),
-    skipped under `--save-inference-only`;
-  - `best_model.pt` keeps the full checkpoint of the lowest `combra_fid10k` tick and
-    is written in **both** modes, so a full resume anchor always exists.
-
-  `load_latest` now resumes from `network-snapshot-latest.pt`, then `best_model.pt`,
-  then the legacy numbered `training-state-*.pt` (older runs still resume).
-  (`training/training_loop.py`, `torch_utils/distributed.py`)
+- **Unified training CLI (§2).** Progress is counted in **kimg and ticks**:
+  `--duration/--status/--snapshot` (and the `Ki/Mi` suffix parsing) are replaced by
+  `--kimg`/`--tick`/`--snap`. The total-batch flag `--batch` is gone; the batch is
+  `--batch-gpu × --gpus × --grad-accum` with `--grad-accum` explicit (default 1).
+  `--fp16` becomes `--precision {fp32,fp16,bf16}`; `--tf32 True/False` (default
+  `True`, previously hardcoded off) and `--bench True/False` control the cuDNN/matmul
+  paths. `--latent/--pixel` becomes `--latent True/False`. Added `--desc`,
+  `--workers` (default 3), and `--mirror True/False` (loader-level stochastic
+  horizontal flip in the **training** loader only; eval and the combra reference
+  never flip).
+- **Checkpoint contract (§3).** Snapshots are now EMA-only `.pt` **state dicts**
+  named `edm2-snapshot-<kimg:06d>[-<ema_std>]-inference.pt`, written atomically
+  (temp + `os.replace`) every snapshot tick **and always at the last tick**, pruned
+  to `--snapshot-keep-last` (default 3, `0` = keep all). Every snapshot carries
+  `{n_classes, resolution, class_names, cur_nimg}` metadata; loading rebuilds the
+  model from current code.
+- **Generation contract (§4).** `edm2-gen-images` gains a class-batch mode
+  (`--classes 0,1,4-6` or names + `--samples-per-class N`) and `--save-mode
+  {hdf5,dir}`. HDF5 output is the `RankH5Writer` layout (`class_<c>/images|seeds`,
+  uint8 NHWC) written as per-rank `shards/rank_NNN.h5` and merged into `<desc>.h5`
+  with `format="generated_images_shard"`, `schema_version=1` and `class_names`; the
+  merge **hard-fails** on incomplete shards (`missing_count`). Generation
+  self-spawns per-GPU workers via `--gpus` (no torchrun) and uses `--batch-gpu`. The
+  per-image seed is `base + class·samples_per_class + idx`. `--network` is an alias
+  for `--net`.
+- **combra evaluation (§6).** The reference is now extracted from **raw dataset
+  pixels** (never VAE round-tripped), and `--combra-ref-count` takes a **seeded
+  random** subset instead of the first N.
+- **Logging (§7).** `stats.jsonl` is scalar-rows-only; the vendored
+  OpenAI-baselines `progress.csv` / `progress.json` are gone. The console log is
+  rank-0-only and named after the run directory; the tfevents file carries the run
+  name as a `filename_suffix`.
+- **Dataset/label contract (§5).** `edm2-prepare-data convert` writes index-aligned
+  `class_names` (alphabetical folder order) into `dataset.json`; RGB conversion
+  happens at build time with runtime 3-channel asserts.
 
 ### Removed
-- `--checkpoint` interval flag and `checkpoint_nimg` (the full checkpoint now
-  follows the snapshot cadence). `--save-inference-only` no longer maps to
-  `--checkpoint=0`; it directly gates `network-snapshot-latest.pt`.
-  (`train_edm2.py`, `configs/config.yaml`)
+- **Resume / best-model machinery**: `--resume`-style auto-resume, the rolling
+  `network-snapshot-latest.pt`, `best_model.pt`, `--save-inference-only`, and the
+  desc-matching run-dir reuse. Every launch allocates a **fresh** run id.
+- **Pickled-module snapshots** (`.pkl`) and their loaders; the last pickle-capable
+  commit is tagged `legacy-pkl`.
+- **Hydra** (`train_hydra.py`, `configs/`, the `hydra-core` dependency) and
+  `requirements.txt` (pyproject is the only dependency declaration). The committed
+  `.hydra/` dir and `train_hydra.log` were untracked.
+- Dead `should_stop` / `should_suspend` / `update_progress` stubs; the stale
+  `docs/*-help.txt` dumps; the `sbatch/` collection.
 
 ### Added
-- `--snapshot-keep-last INT` (default 3) to bound inference-snapshot disk usage.
-- Training sbatches (`sbatch/train_2h200_*.sbatch`) drop `--save-inference-only`
-  so runs keep the resumable state by default.
+- `sh/` launch scripts (`train_{256,512,1024}.sh`, `generate_{256,512,1024}.sh`) —
+  self-locating, offline-cluster-ready (`HF_HUB_OFFLINE=1`), SLURM specifics
+  supplied at submission time.
+- `h5py` dependency; `--precision`, `--tf32`, `--grad-accum`, `--desc`,
+  `--workers`, `--mirror` training flags; conformance smoke tests (§13).
 
 ## [2.1.0] — 2026-07-09
 

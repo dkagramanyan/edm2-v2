@@ -146,27 +146,28 @@ def _decode_to_nhwc_uint8(encoder, latents):
     return px.permute(0, 2, 3, 1).contiguous().cpu().numpy()
 
 @torch.inference_mode()
-def load_reference_shard(dataset_obj, encoder, count, batch, device, rank, world_size):
-    """Load this rank's shard of the real reference set as RGB uint8 NHWC.
+def load_reference_shard(dataset_obj, count, batch, device, rank, world_size, *, seed=0):
+    """Load this rank's shard of the real reference set as **raw** RGB uint8 NHWC.
 
-    The first ``min(count, len)`` dataset items are split round-robin across ranks
-    (``idx % world_size == rank``). Each raw item is passed through the encoder
-    (``encode_latents`` then ``decode``) so the reference lives in the same
-    VAE-decoded pixel space as the generated samples."""
-    encoder.init(device)
-    n_total = min(int(count), len(dataset_obj))
-    my_idx = [i for i in range(n_total) if i % world_size == rank]
-    chunks, buf = [], []
+    Reference images are the raw dataset pixels -- never flip-augmented and never VAE
+    round-tripped (§6), so a VAE quality gap shows up in the metric instead of being
+    hidden. When ``count`` caps the reference below the dataset size the subset is a
+    **seeded random** draw (never the first N -- dataset zips are class-sorted, so a
+    first-N slice is class-biased). The chosen indices are split round-robin across
+    ranks (``pos % world_size == rank``)."""
+    n = len(dataset_obj)
+    n_total = min(int(count), n)
+    if n_total < n:
+        idx = np.sort(np.random.RandomState(int(seed) & 0x7fffffff).choice(n, n_total, replace=False))
+    else:
+        idx = np.arange(n)
+    my_idx = [int(i) for pos, i in enumerate(idx) if pos % world_size == rank]
+    chunks = []
     for i in my_idx:
-        img, _ = dataset_obj[i]
-        buf.append(torch.as_tensor(img))
-        if len(buf) == batch:
-            chunks.append(_decode_to_nhwc_uint8(encoder, encoder.encode_latents(torch.stack(buf).to(device))))
-            buf = []
-    if buf:
-        chunks.append(_decode_to_nhwc_uint8(encoder, encoder.encode_latents(torch.stack(buf).to(device))))
+        img, _ = dataset_obj[i]  # uint8 CHW
+        chunks.append(np.asarray(img)[np.newaxis].transpose(0, 2, 3, 1))
     if chunks:
-        return np.concatenate(chunks, 0)
+        return np.concatenate(chunks, 0).astype(np.uint8)
     return np.zeros((0, 1, 1, 3), dtype=np.uint8)
 
 @torch.inference_mode()
@@ -237,7 +238,7 @@ def combra_smoke_test(ref_images, device, log_fn=print):
         raise RuntimeError(
             f"combra metrics smoke test produced non-finite values for {bad} -- a "
             "metric backend or optional dependency is missing/broken. Fix the install "
-            "or pass --no-combra-metrics."
+            "or pass --combra-metrics False."
         )
     log_fn("combra metrics smoke test passed")
 
