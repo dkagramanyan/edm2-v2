@@ -25,14 +25,14 @@ https://arxiv.org/abs/2406.02507
 
 | Area | Upstream edm2 | This refresh |
 |---|---|---|
-| **Logging** | single `Status:` line + `stats.jsonl` | DiffiT-style logger: `log.txt`, `progress.csv`, `progress.json`, `stats.jsonl`, TensorBoard (`events.out.tfevents.*`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids. **Every scalar** (losses, LR, timing, resources, combra metrics, tick) **and the image grids are mirrored to TensorBoard** |
+| **Logging** | single `Status:` line + `stats.jsonl` | rank-0 `<run>.log`, scalar-only `stats.jsonl`, TensorBoard (`events.out.tfevents.*` with the run name as `filename_suffix`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids |
 | **Latent encoding** | dataset pre-encoded to an 8-channel latent zip offline | **inline VAE encode** (DiffiT-style): train latent diffusion straight from a raw-RGB zip, the frozen Stability VAE runs each step — no pre-encode pass. Offline 8-channel latent zips still work and are auto-detected |
-| **Checkpointing** | full resumable `training-state-*.pt` (one per tick) | best-of-both, each snapshot tick: self-contained inference `network-snapshot-*.pkl` (EMA + encoder) **accumulate as history** (pruned to the newest `--snapshot-keep-last`, default 3), the big resumable state **overwrites a single `network-snapshot-latest.pt`** (atomic, never accumulates), and **`best_model.pt`** keeps the lowest-combra-FID full checkpoint. `--save-inference-only` skips `network-snapshot-latest.pt` (you still resume from `best_model.pt`) |
-| **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
-| **Samplers** | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval, generation and bulk sampling** |
-| **Step-count analysis** | — | `edm2-compare-samplers`: sweep samplers × step counts, score with combra, find the optimal number of sampling steps (metric-vs-steps plateau) |
-| **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points (`edm2-train`, `edm2-gen-images`, `edm2-sample`, `edm2-eval`, `edm2-compare-samplers`, `edm2-prepare-data`, `edm2-download-models`) |
-| **Resolutions** | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets + sbatch for 256/512/1024 |
+| **Checkpointing** | full resumable `training-state-*.pt` (one per tick) | **EMA-only `.pt` state-dict inference snapshots** `edm2-snapshot-<kimg>[-<std>]-inference.pt`, written atomically each snapshot tick **and always at the last tick**, pruned to `--snapshot-keep-last` (default 3). Every snapshot carries `{n_classes, resolution, class_names, cur_nimg}`. **No resume, no best-model, no rolling latest** — the newest snapshot is the final model |
+| **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**, reference from **raw dataset pixels**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
+| **Generation** | flat `<seed>.png` | per-class HDF5 (`edm2-gen-images --classes … --samples-per-class …`) in the wc_cv angle-pipeline `RankH5Writer` layout, self-spawning `--gpus` (no torchrun) |
+| **Samplers** | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval and generation** |
+| **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points; pyproject is the only dependency declaration (no `requirements.txt`, no Hydra) |
+| **Resolutions** | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets + `sh/` launch scripts for 256/512/1024 |
 
 ## Installation
 
@@ -104,37 +104,34 @@ model resolution follows the dataset's latent resolution (32² / 64² / 128²).
 
 ## Training
 
-Pick a preset with `--preset`; any CLI option overrides the preset. Launch with
-`torchrun` for multi-GPU (the global batch is reached via gradient accumulation
-automatically):
+Pick a preset with `--cfg`; any CLI option overrides the preset. `--gpus N`
+self-spawns one worker per GPU — **no `torchrun` for training**. The global batch is
+`--batch-gpu × --gpus × --grad-accum`:
 
 ```bash
 # 256²
-torchrun --standalone --nproc_per_node=2 train_edm2.py \
-    --outdir=training-runs --preset=edm2-img256-s \
-    --data=datasets/imagenet_256x256.zip --batch-gpu=96
+edm2-train --outdir=runs --cfg=edm2-img256-s \
+    --data=datasets/wc_co_256x256.zip --gpus=2 --batch-gpu=64 --tick=128 --snap=64
 
 # 512²
-torchrun --standalone --nproc_per_node=2 train_edm2.py \
-    --outdir=training-runs --preset=edm2-img512-s \
-    --data=datasets/imagenet_512x512.zip --batch-gpu=32
+edm2-train --outdir=runs --cfg=edm2-img512-s \
+    --data=datasets/wc_co_512x512.zip --gpus=2 --batch-gpu=32 --tick=128 --snap=64
 
 # 1024²
-torchrun --standalone --nproc_per_node=2 train_edm2.py \
-    --outdir=training-runs --preset=edm2-img1024-s \
-    --data=datasets/imagenet_1024x1024.zip --batch-gpu=8
+edm2-train --outdir=runs --cfg=edm2-img1024-s \
+    --data=datasets/wc_co_1024x1024.zip --gpus=2 --batch-gpu=16 --tick=128 --snap=64
 ```
 
-To **resume**, run the exact same command again — training auto-resumes from
-`network-snapshot-latest.pt` in the run directory, falling back to `best_model.pt`
-(and then to any legacy numbered `training-state-*.pt`) if it is absent.
+**Runs are not resumable by design** (§3): a crash or SLURM walltime kill cannot be
+continued, and every launch allocates a fresh run id. Size `--kimg` (or split
+resolution stages) so a run fits its job's time limit.
 
-Ready-made SLURM scripts (H200) live in `sbatch/`:
+Ready-made launch scripts live in `sh/` — self-locating and offline-cluster ready
+(`HF_HUB_OFFLINE=1`); SLURM specifics are supplied at submission time:
 
 ```bash
-sbatch sbatch/train_2h200_256x256.sbatch
-sbatch sbatch/train_2h200_512x512.sbatch
-sbatch sbatch/train_2h200_1024x1024.sbatch
+bash sh/train_256.sh                                   # workstation
+sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 ```
 
 ### Key training options
@@ -143,75 +140,46 @@ sbatch sbatch/train_2h200_1024x1024.sbatch
 |--------|---------|-------------|
 | `--outdir` | required | Output directory for the run |
 | `--data` | required | Dataset zip/dir (`edm2-prepare-data` output) |
-| `--preset` | `edm2-img512-s` | Config preset (`edm2-img256/512/1024-*`, `edm2-img64-*`) |
+| `--cfg` | `edm2-img512-s` | Config preset (`edm2-img256/512/1024-*`, `edm2-img64-*`) |
+| `--gpus` | 1 | GPUs to self-spawn (no torchrun) |
 | `--cond` | `True` | Train class-conditional model |
-| `--batch-gpu` | auto | Per-GPU batch size (global batch reached via accumulation) |
-| `--fp16` | `True` | Mixed-precision training |
-| `--status` / `--snapshot` | 128Ki / 8Mi | Status / snapshot intervals (images) |
-| `--snapshot-keep-last` | 3 | Newest inference `.pkl` kept (0 = keep all); never touches `best_model.pt` / latest |
-| `--save-inference-only` | `False` | Skip `network-snapshot-latest.pt`; still writes `.pkl` + `best_model.pt` for resume |
-| `--combra-metrics / --no-combra-metrics` | on | Inline combra metrics each snapshot tick (all ranks) |
+| `--batch-gpu` | 32 | Per-GPU batch size |
+| `--grad-accum` | 1 | Gradient accumulation rounds (total batch = batch-gpu × gpus × grad-accum) |
+| `--precision` | `fp16` | Training precision (`fp32`/`fp16`/`bf16`) |
+| `--tf32` | `True` | Enable TF32 on cuDNN / matmul |
+| `--tick` / `--snap` | 128 / 64 | Status tick interval (kimg) / snapshot every N ticks |
+| `--kimg` | preset | Total training length in kimg |
+| `--mirror` | `False` | Stochastic horizontal flip in the training loader only |
+| `--workers` | 3 | DataLoader worker processes |
+| `--snapshot-keep-last` | 3 | Newest inference snapshots kept (0 = keep all) |
+| `--desc` | — | String appended to the run directory name |
+| `--combra-metrics` | `True` | Inline combra metrics each snapshot tick (all ranks) |
 | `--num-fid-samples` | 10000 | Fakes generated (all ranks) per combra eval; 0 disables |
-| `--combra-ref-count` | 0 (whole set) | Real reference images for combra |
+| `--combra-ref-count` | 0 (whole set) | Real reference images for combra (seeded random subset) |
 | `--eval-sampler` | `dpm++` | Eval-time / snapshot sampler (`edm/euler/ddim/dpm++`) |
 | `--eval-sampling-steps` | 25 | Eval-time sampling steps |
 | `--guidance` | 1 | Eval-time classifier-free guidance strength |
 | `-n, --dry-run` | off | Print resolved config and exit |
 
-### Hydra entry point
-
-`train_hydra.py` is a thin wrapper around the same launch path (DiffiT-v2 / san-v2
-style). The click CLI in `train_edm2.py` stays the single source of truth for every
-option and default: the Hydra path introspects it, overlays `configs/config.yaml`
-plus any command-line overrides, and calls the same
-`train_edm2.launch_from_opts(opts)` the click entry point uses — so both paths
-produce identical run configs.
-
-```bash
-python train_hydra.py outdir=./training-runs preset=edm2-img256-s \
-    data=./datasets/imagenet_256x256.zip gpus=2 batch_gpu=64
-```
-
-Override any option by its **Python name** (dashes become underscores; `--cfg` /
-`--preset` is named `preset`):
-
-```bash
-python train_hydra.py outdir=./training-runs preset=edm2-img256-s data=... \
-    gpus=2 batch_gpu=64 combra_metrics=false save_inference_only=true \
-    eval_sampler=edm eval_sampling_steps=32 snap=100
-```
-
-Every option is listed in `configs/config.yaml` so plain `key=value` overrides work
-without Hydra's `+` prefix. A `null` there means "not provided" and leaves the click
-default in place, so the YAML never duplicates — or drifts from — those defaults.
-
 ### Training output
 
 ```
-training-runs/00000-edm2-img256-s-gpus2-batch2048/
-├── training_options.json   # all hyperparameters
-├── log.txt                 # human-readable log (rank 0)
-├── log-rank001.txt …       # per-rank logs
-├── progress.csv            # CSV metrics
-├── progress.json           # JSON-lines metrics
-├── stats.jsonl             # SAN-v2-style stats + combra metrics
-├── events.out.tfevents.*   # TensorBoard
-├── reals.png               # real image grid
-├── fakes_init.png          # pre-training samples
-├── fakes000200.png …       # samples per snapshot tick
-├── network-snapshot-*.pkl    # EMA + encoder (inference artifact; newest --snapshot-keep-last kept)
-├── network-snapshot-latest.pt  # full resumable state (single file, overwritten each tick)
-└── best_model.pt             # full resumable state at the lowest combra FID
+runs/00000-edm2-img256-s-gpus2-batch128/
+├── training_options.json                       # all hyperparameters
+├── 00000-edm2-img256-s-gpus2-batch128.log      # rank-0 console transcript
+├── stats.jsonl                                 # machine-readable scalars + combra metrics (scalar rows only)
+├── events.out.tfevents.*.00000-…-batch128      # TensorBoard (run name as filename_suffix)
+├── reals.png                                   # real image grid (raw dataset pixels, class-sorted)
+├── fakes_init.png                              # pre-training samples
+├── fakes000200.png …                           # samples per snapshot tick
+└── edm2-snapshot-000200-0.100-inference.pt …   # EMA-only .pt state dicts (one per EMA std), pruned
 ```
 
-Each run gets its own directory under `--outdir`, named
-`<id:05d>-<preset>-gpus<N>-batch<B>` (DiffiT-style). **Re-running the same command
-reuses the matching directory** rather than numbering a new one — that is how edm2
-resumes, since it picks up `network-snapshot-latest.pt` from the run directory.
-Changing the preset, GPU count or batch size yields a different name and therefore a
-fresh run.
+Each run gets a **fresh** directory under `--outdir`, named
+`<id:05d>-<cfg>-gpus<N>-batch<B>[-desc]`. The newest snapshot is always the final
+model (a snapshot is written at the last tick regardless of cadence).
 
-Monitor with `tensorboard --logdir training-runs`.
+Monitor with `tensorboard --logdir runs`.
 
 ## Quality metrics (combra, all ranks)
 
@@ -230,23 +198,24 @@ unchanged for standalone reference-stats evaluation.
 
 ## Generating samples
 
-Individual PNGs (per seed):
+Per-class HDF5 in the wc_cv angle-pipeline layout (`--gpus` self-spawns workers, no
+torchrun). `--classes` accepts indices, ranges, or class names:
 
 ```bash
-edm2-gen-images --net=training-runs/00000-.../network-snapshot-final.pkl \
-    --outdir=generated/512 --seeds=0-63 --sampler=dpm++ --steps=25 --class=207
+edm2-gen-images \
+    --network=runs/00000-.../edm2-snapshot-000200-0.100-inference.pt \
+    --outdir=generated/512 --classes=0,1,2 --samples-per-class=1000 \
+    --gpus=2 --batch-gpu=32 --save-mode=hdf5 --sampler=dpm++ --steps=25
 ```
 
-Bulk `.npz` for FID (distributed):
+This writes per-rank `shards/rank_NNN.h5` (`class_<c>/images|seeds`, uint8 NHWC),
+merged into `<desc>.h5` with `format="generated_images_shard"`, `schema_version=1`
+and `class_names`; the merge hard-fails if any shard is incomplete. `--save-mode=dir`
+writes `class_<c>/idx_<i:06d>_seed_<s>.png` + a `classes.json` manifest instead.
 
-```bash
-torchrun --standalone --nproc_per_node=4 sample_images.py \
-    --net=…/network-snapshot-final.pkl --outdir=samples/512 \
-    --num-samples=50000 --batch=16 --sampler=dpm++ --steps=25
-```
-
-SLURM: `sbatch sbatch/generate_1gpu_{256,512,1024}.sbatch`,
-`sbatch sbatch/sample_4gpu_{256,512,1024}.sbatch`.
+SLURM: `sbatch --gpus=2 sh/generate_{256,512,1024}.sh`. The legacy per-seed
+(`--seeds`) mode and the bulk `.npz` `sample_images.py` remain for the upstream FID
+protocol but carry no contract guarantees.
 
 ## Samplers
 
@@ -268,21 +237,19 @@ the metric-vs-steps curve plateaus at the optimal step count per sampler:
 
 ```bash
 python compare_samplers.py \
-    --net=…/network-snapshot-final.pkl --data=datasets/imagenet_256x256.zip \
+    --net=runs/00000-.../edm2-snapshot-000200-0.100-inference.pt --data=datasets/wc_co_256x256.zip \
     --samplers=edm,euler,ddim,dpm++ --k-values=5,10,20,50,100,250 \
     --num-samples=512 --outdir=sampler-comparison/256
 # -> sampler_comparison.parquet + sampler_comparison.png
 ```
-
-SLURM: `sbatch sbatch/compare_samplers_256x256.sbatch`.
 
 ## Project structure
 
 ```
 edm2-v2/
 ├── train_edm2.py            # training entry point (edm2-train)
-├── generate_images.py       # per-seed PNG generation (edm2-gen-images)
-├── sample_images.py         # bulk .npz sampling (edm2-sample)
+├── generate_images.py       # per-class HDF5 generation (edm2-gen-images)
+├── sample_images.py         # [legacy] bulk .npz sampling (edm2-sample)
 ├── compare_samplers.py      # optimal-steps analysis (edm2-compare-samplers)
 ├── calculate_metrics.py     # offline FID / FD-DINOv2 (edm2-eval)
 ├── dataset_tool.py          # dataset preparation (edm2-prepare-data)
@@ -292,12 +259,14 @@ edm2-v2/
 │   ├── networks_edm2.py     # Precond + magnitude-preserving U-Net (frozen)
 │   ├── phema.py             # Power-Function / Traditional EMA (frozen)
 │   ├── encoders.py          # RGB / Stability VAE latent encode-decode
-│   ├── dataset.py           # ImageFolderDataset
-│   ├── logger.py            # DiffiT-style multi-format logger
+│   ├── dataset.py           # ImageFolderDataset (writes/reads class_names)
+│   ├── checkpoint.py        # .pt EMA-only inference snapshot save/load
+│   ├── h5_writer.py         # RankH5Writer + shard merge
+│   ├── logger.py            # rank-0 text/TensorBoard logger
 │   ├── metrics.py           # inline combra metrics, sharded across ranks
 │   └── samplers.py          # edm / euler / ddim / dpm++
-├── sbatch/                  # SLURM scripts (train/generate/sample/compare, 3 res)
-├── tests/test_smoke.py      # CPU smoke tests
+├── sh/                      # launch scripts (train/generate, 3 res)
+├── tests/                   # CPU smoke + §13 conformance tests
 └── pyproject.toml           # packaging + console entry points
 ```
 
