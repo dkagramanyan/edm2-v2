@@ -234,7 +234,23 @@ class ImageFolderDataset(Dataset):
             else:
                 image = np.array(PIL.Image.open(f))
                 image = image.reshape(*image.shape[:2], -1).transpose(2, 0, 1)
+        if ext != '.npy':
+            # RGB is fixed at dataset-build time (dataset_tool convert). Assert here
+            # instead of silently converting a stray grayscale image at runtime (§5).
+            assert image.shape[0] == 3, (
+                f'{fname}: expected 3-channel RGB, got {image.shape[0]} channels; '
+                'rebuild the dataset with edm2-prepare-data convert')
         return image
+
+    @property
+    def class_names(self):
+        # Index-aligned grain-class names written by dataset_tool (§5). None if the
+        # dataset predates the label contract.
+        if 'dataset.json' not in self._all_fnames:
+            return None
+        with self._open_file('dataset.json') as f:
+            meta = json.load(f)
+        return meta.get('class_names')
 
     def _load_raw_labels(self):
         fname = 'dataset.json'

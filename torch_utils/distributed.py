@@ -6,7 +6,6 @@
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
 import os
-import re
 import socket
 
 import torch
@@ -58,102 +57,8 @@ def get_world_size():
 
 #----------------------------------------------------------------------------
 
-def should_stop():
-    return False
-
-#----------------------------------------------------------------------------
-
-def should_suspend():
-    return False
-
-#----------------------------------------------------------------------------
-
-def request_suspend():
-    pass
-
-#----------------------------------------------------------------------------
-
-def update_progress(cur, total):
-    pass
-
-#----------------------------------------------------------------------------
-
 def print0(*args, **kwargs):
     if get_rank() == 0:
         print(*args, **kwargs)
-
-#----------------------------------------------------------------------------
-
-class CheckpointIO:
-    def __init__(self, **kwargs):
-        self._state_objs = kwargs
-
-    def save(self, pt_path, verbose=True):
-        if verbose:
-            print0(f'Saving {pt_path} ... ', end='', flush=True)
-        data = dict()
-        for name, obj in self._state_objs.items():
-            if obj is None:
-                data[name] = None
-            elif isinstance(obj, dict):
-                data[name] = obj
-            elif hasattr(obj, 'state_dict'):
-                data[name] = obj.state_dict()
-            elif hasattr(obj, '__getstate__'):
-                data[name] = obj.__getstate__()
-            elif hasattr(obj, '__dict__'):
-                data[name] = obj.__dict__
-            else:
-                raise ValueError(f'Invalid state object of type {type(obj).__name__}')
-        if get_rank() == 0:
-            # Atomic write: the single overwriting `network-snapshot-latest.pt` /
-            # `best_model.pt` are the sole resume points, so a crash mid-save must
-            # not truncate them. Write to a temp file, then os.replace().
-            tmp_path = pt_path + '.tmp'
-            torch.save(data, tmp_path)
-            os.replace(tmp_path, pt_path)
-        if verbose:
-            print0('done')
-
-    def load(self, pt_path, verbose=True):
-        if verbose:
-            print0(f'Loading {pt_path} ... ', end='', flush=True)
-        # weights_only=False: the checkpoint holds dnnlib.EasyDict state, which the
-        # torch>=2.6 safe unpickler rejects. It is a file we wrote ourselves.
-        data = torch.load(pt_path, map_location=torch.device('cpu'), weights_only=False)
-        for name, obj in self._state_objs.items():
-            if obj is None:
-                pass
-            elif isinstance(obj, dict):
-                obj.clear()
-                obj.update(data[name])
-            elif hasattr(obj, 'load_state_dict'):
-                obj.load_state_dict(data[name])
-            elif hasattr(obj, '__setstate__'):
-                obj.__setstate__(data[name])
-            elif hasattr(obj, '__dict__'):
-                obj.__dict__.clear()
-                obj.__dict__.update(data[name])
-            else:
-                raise ValueError(f'Invalid state object of type {type(obj).__name__}')
-        if verbose:
-            print0('done')
-
-    def load_latest(self, run_dir, pattern=r'training-state-(\d+).pt', verbose=True):
-        # Prefer the rolling full checkpoint written every snapshot tick, then
-        # best_model.pt (the anchor that always exists, incl. under
-        # --save-inference-only), then the legacy numbered training-state-<nimg>.pt
-        # so run dirs produced before this scheme still resume.
-        for name in ('network-snapshot-latest.pt', 'best_model.pt'):
-            path = os.path.join(run_dir, name)
-            if os.path.isfile(path):
-                self.load(path, verbose=verbose)
-                return path
-        fnames = [entry.name for entry in os.scandir(run_dir) if entry.is_file() and re.fullmatch(pattern, entry.name)]
-        if len(fnames) == 0:
-            return None
-        pt_path = os.path.join(run_dir, max(fnames, key=lambda x: float(re.fullmatch(pattern, x).group(1))))
-        self.load(pt_path, verbose=verbose)
-        return pt_path
 
 #----------------------------------------------------------------------------
