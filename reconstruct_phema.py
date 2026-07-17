@@ -5,7 +5,11 @@
 # You should have received a copy of the license along with this
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
-"""Perform post-hoc EMA reconstruction."""
+"""[legacy] Perform post-hoc EMA reconstruction from the upstream EDM2
+``network-snapshot-<nimg>-<std>.pkl`` files. The v2 checkpoint contract (§3) writes
+EMA-only ``.pt`` state-dict snapshots instead, so this tool applies only to the
+upstream NVIDIA pickled-module artifacts (readable via the ``legacy-pkl`` tag), not
+to snapshots produced by this repo's current training loop."""
 
 import copy
 import os

@@ -15,20 +15,20 @@ of samples is generated and scored against a fixed real reference batch with
 optimal step count. The generic sweep/plot lives in combra so it stays
 codebase-agnostic; this script is only the EDM2-side wiring.
 
-Example (see also sbatch/compare_samplers_256x256.sbatch):
-    python compare_samplers.py --net=network-snapshot-....pkl \\
-        --data=datasets/imagenet_256x256.zip --num-samples=512 \\
+Example:
+    python compare_samplers.py --net=run/edm2-snapshot-002000-0.100-inference.pt \\
+        --data=datasets/wc_co_256x256.zip --num-samples=512 \\
         --samplers=edm,euler,ddim,dpm++ --k-values=5,10,20,50,100,250 \\
         --outdir=sampler-comparison/256
 """
 
-import pickle
 from pathlib import Path
 
 import click
 import torch
 
 import dnnlib
+from generate_images import load_network
 from torch_utils import distributed as dist
 from training.metrics import generate_fake_shard, load_reference_shard
 
@@ -44,8 +44,8 @@ def _parse_csv(s):
 
 
 @click.command()
-@click.option('--net',          help='Network pickle filename', metavar='PATH|URL',     type=str, required=True)
-@click.option('--gnet',         help='Guiding network pickle filename', metavar='PATH|URL', type=str, default=None)
+@click.option('--net', '--network', 'net', help='Network checkpoint (.pt or legacy .pkl)', metavar='PATH|URL', type=str, required=True)
+@click.option('--gnet',         help='Guiding network', metavar='PATH|URL',             type=str, default=None)
 @click.option('--data',         help='Real reference dataset (zip or dir)', metavar='ZIP|DIR', type=str, required=True)
 @click.option('--num-samples',  help='Samples (and real refs) per (sampler, k)', metavar='INT', type=click.IntRange(min=2), default=512, show_default=True)
 @click.option('--batch',        help='Per-forward batch size', metavar='INT',           type=click.IntRange(min=1), default=32, show_default=True)
@@ -63,21 +63,19 @@ def main(net, gnet, data, num_samples, batch, sampler_names, k_values, guidance,
     names = _parse_csv(sampler_names)
     ks = [int(x) for x in _parse_csv(k_values)]
 
-    # Load model + encoder from the snapshot pickle.
-    with dnnlib.util.open_url(net) as f:
-        pkl = pickle.load(f)
-    model = pkl['ema'].to(device).eval()
-    encoder = pkl['encoder']
+    # Load model + encoder from the snapshot.
+    model, encoder, _meta = load_network(net, device)
+    model = model.eval()
     encoder.init(device)
     guide_net = None
     if guidance != 1 and gnet is not None:
-        with dnnlib.util.open_url(gnet) as f:
-            guide_net = pickle.load(f)['ema'].to(device).eval()
+        guide_net, _e, _m = load_network(gnet, device)
+        guide_net = guide_net.eval()
 
-    # Fixed real reference batch (single process: rank 0 / world 1).
+    # Fixed real reference batch (single process: rank 0 / world 1), raw pixels (§6).
     dataset = dnnlib.util.construct_class_by_name(
         class_name='training.dataset.ImageFolderDataset', path=data, use_labels=False)
-    reference = load_reference_shard(dataset, encoder, num_samples, batch, device, 0, 1)
+    reference = load_reference_shard(dataset, num_samples, batch, device, 0, 1, seed=seed)
 
     # One generator per sampler; fn(k) -> a uint8 NHWC batch generated with k steps.
     def make_fn(name):
