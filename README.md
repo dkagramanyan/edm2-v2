@@ -1,10 +1,11 @@
 # EDM2: Analyzing and Improving the Training Dynamics of Diffusion Models (v2 refresh)
 
-Official EDM2 codebase, refreshed to match the **DiffiT-v2** workflow: a
-multi-format training logger, inline **combra** generative-quality metrics
-computed **across all GPU ranks**, a packaged `click` + console-entry-point API,
-class-conditional ImageNet latent-diffusion training at **256 / 512 / 1024**,
-and multiple reverse-diffusion samplers (**EDM Heun / Euler / DDIM / DPM-Solver++**).
+Official EDM2 codebase, refreshed to the **v2 model-API convention** (see the wc_cv
+`models_api_proposal`): a unified `click` + console-entry-point CLI, inline **combra**
+generative-quality metrics computed **across all GPU ranks**, EMA-only `.pt`
+inference snapshots, per-class **HDF5** generation for the WC-Co angle pipeline,
+class-conditional latent-diffusion training at **256 / 512 / 1024**, and multiple
+reverse-diffusion samplers (**EDM Heun / Euler / DDIM / DPM-Solver++**).
 
 Based on:
 
@@ -77,7 +78,7 @@ few composable methods, all available here:
   unconditional model (`label_dim = 0`).
 - **Null (unconditional) label.** Passing `class_labels=None` (or an all-zero
   one-hot) evaluates the model unconditionally — this is what the guiding network
-  uses, and what omitting `--class` combined with a null network produces.
+  uses.
 - **Classifier-free / auto-guidance.** At sampling time you can steer generation
   with a second *guiding* network via `--gnet` and `--guidance` (strength `> 1`):
   the denoiser output is extrapolated away from the guiding network's,
@@ -85,22 +86,26 @@ few composable methods, all available here:
   checkpoint (autoguidance) or an unconditional model as `--gnet`. `--guidance 1`
   (default) disables guidance. The same `--guidance` is honored during training-time
   combra eval and by every sampler (`edm/euler/ddim/dpm++`).
-- **Specific class.** `edm2-gen-images --class=<idx>` (and `edm2-sample --class=<idx>`)
-  fixes the class label for all generated images; without it, a class is sampled
-  at random per image.
+- **Specific classes.** `edm2-gen-images --classes=<spec> --samples-per-class=N`
+  selects which classes to generate — `<spec>` is indices, ranges, or class names
+  (`0,1,4-6` or `Ultra_Co11`). The legacy `--seeds` mode takes a single `--class`.
 
-## Data preparation (ImageNet)
+## Data preparation
 
-Convert an ImageNet-like dataset to a training zip in the VAE latent space (labels
-are stored in `dataset.json`), using ADM/Dhariwal center-cropping:
+`edm2-prepare-data` is a click group. `convert` center-crops a folder of images into
+an **RGB** training zip, deriving integer labels from the **alphabetical
+class-folder order** and writing index-aligned `class_names` into `dataset.json`
+(grayscale SEM images are converted to RGB at build time):
 
 ```bash
-edm2-prepare-data --source=/data/imagenet --dest=datasets/imagenet_512x512.zip \
+edm2-prepare-data convert --source=/data/wc_co --dest=datasets/wc_co_512x512.zip \
     --resolution=512x512 --transform=center-crop-dhariwal
 ```
 
-Produce one zip per target resolution (`256x256`, `512x512`, `1024x1024`). The
-model resolution follows the dataset's latent resolution (32² / 64² / 128²).
+Produce one zip per target resolution (`256x256`, `512x512`, `1024x1024`). Training
+runs latent diffusion straight from the RGB zip — the frozen Stability VAE encodes
+inline each step, no pre-encode pass. An 8-channel pre-encoded latent zip
+(`edm2-prepare-data encode`, legacy) is auto-detected too.
 
 ## Training
 
@@ -185,8 +190,9 @@ Monitor with `tensorboard --logdir runs`.
 
 With `--combra-metrics` on (default), every snapshot tick generates
 `--num-fid-samples` (10k) fakes **on all ranks** with the eval sampler, scored
-against the **whole training set** as the real reference. Feature and angle
-extraction is sharded per rank and gathered to rank 0, which computes the
+against the training set as the real reference — **raw dataset pixels**, never VAE
+round-tripped (`--combra-ref-count` caps it to a seeded random subset). Feature and
+angle extraction is sharded per rank and gathered to rank 0, which computes the
 distances — so the metrics are computed on all GPU ranks, matching DiffiT-v2.
 Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:
 
