@@ -1,6 +1,0 @@
-- outdir=/tmp/claude-1000/-home-david-mnt-ssd-2-sata-python-phd/cf740145-d6b2-4daf-9639-ab7f27078ed5/scratchpad/rr
-- preset=edm2-img256-s
-- data=/tmp/claude-1000/-home-david-mnt-ssd-2-sata-python-phd/cf740145-d6b2-4daf-9639-ab7f27078ed5/scratchpad/toy64.zip
-- gpus=2
-- batch_gpu=64
-- dry_run=true
