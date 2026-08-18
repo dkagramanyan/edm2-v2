@@ -8,10 +8,12 @@
 """Main training loop."""
 
 import glob
+import importlib.util
 import json
 import os
 import re
 import time
+from datetime import datetime
 
 import numpy as np
 import PIL.Image
@@ -258,6 +260,15 @@ def training_loop(
     # features are reused every eval tick. Reference = raw dataset pixels (§6).
     use_combra = bool(combra_metrics) and combra_mod.HAS_COMBRA and (num_fid_samples or 0) > 0
     if combra_metrics and not combra_mod.HAS_COMBRA:
+        # Say WHICH failure this is. Reporting "not installed" for a combra that IS
+        # installed but has moved a symbol sent anyone debugging it to reinstall a
+        # package already present -- that misdirection hid a real break for a whole
+        # combra release. An incompatible combra is fatal: refuse rather than burn a
+        # run that will log no metrics.
+        if combra_mod.COMBRA_IMPORT_ERROR is not None and importlib.util.find_spec('combra') is not None:
+            raise RuntimeError(
+                f'combra is installed but incompatible with this repo: {combra_mod.COMBRA_IMPORT_ERROR}. '
+                'Upgrade combra (>= 0.7.0) or pass --combra-metrics False.')
         dist.print0('WARNING: --combra-metrics requested but combra is not installed; skipping.')
     combra_ref = None
     if use_combra:
@@ -293,6 +304,7 @@ def training_loop(
     start_nimg = state.cur_nimg
     cur_tick = 0
     stats_metrics = None            # latest combra metrics dict (rank 0)
+    best_fid = float('inf')         # running best combra FID -> Metrics/combra_fid_best
     while True:
         done = (state.cur_nimg >= stop_at_nimg)
 
@@ -335,8 +347,11 @@ def training_loop(
             if rank == 0:
                 fmt = {'Progress/tick': '%.0f', 'Progress/kimg': '%.3f', 'timestamp': '%.3f'}
                 collected = [(name, value.mean) for name, value in training_stats.default_collector.as_dict().items()]
-                items = collected + [('Progress/tick', cur_tick), ('timestamp', time.time())]
+                now = time.time()
+                items = collected + [('Progress/tick', cur_tick), ('timestamp', now),
+                                     ('wall_time', state.total_elapsed_time)]
                 items = [f'"{name}": ' + (fmt.get(name, '%g') % value if np.isfinite(value) else 'NaN') for name, value in items]
+                items.append('"datetime": "%s"' % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 stats_jsonl.write('{' + ', '.join(items) + '}\n')
                 stats_jsonl.flush()
                 if sw is not None:
@@ -362,7 +377,25 @@ def training_loop(
                     seed=seed + state.cur_nimg, log_fn=dist.print0)
                 if rank == 0 and stats_metrics:
                     gstep, walltime = int(state.cur_nimg / 1e3), state.total_elapsed_time
-                    stats_jsonl.write(json.dumps(dict(stats_metrics, timestamp=time.time(), kimg=state.cur_nimg / 1e3)) + '\n')
+                    if 'combra_fid' in stats_metrics:
+                        best_fid = min(best_fid, float(stats_metrics['combra_fid']))
+                        stats_metrics['combra_fid_best'] = best_fid
+                    # The metrics row carries the Metrics/ prefix AND its own
+                    # Progress/kimg. combra.metrics.load_fid_by_kimg needs both on the
+                    # same JSON line; the old row had neither (bare combra_fid10k, bare
+                    # kimg), so the reader matched nothing and returned {} for every
+                    # edm2 run -- silently, since it shape-filters rather than raising.
+                    # It is written here, not folded into the next status row: the
+                    # status block runs BEFORE this one, so folding would stamp these
+                    # metrics with the following tick's kimg.
+                    now = time.time()
+                    row = {f'Metrics/{name}': float(value) for name, value in stats_metrics.items()}
+                    row['Progress/kimg'] = state.cur_nimg / 1e3
+                    row['Progress/tick'] = cur_tick
+                    row['timestamp'] = now
+                    row['wall_time'] = state.total_elapsed_time
+                    row['datetime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    stats_jsonl.write(json.dumps(row) + '\n')
                     stats_jsonl.flush()
                     if sw is not None:
                         for name, value in stats_metrics.items():

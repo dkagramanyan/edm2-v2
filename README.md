@@ -29,7 +29,7 @@ https://arxiv.org/abs/2406.02507
 | **Logging** | single `Status:` line + `stats.jsonl` | rank-0 `<run>.log`, scalar-only `stats.jsonl`, TensorBoard (`events.out.tfevents.*` with the run name as `filename_suffix`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids |
 | **Latent encoding** | dataset pre-encoded to an 8-channel latent zip offline | **inline VAE encode** (DiffiT-style): train latent diffusion straight from a raw-RGB zip, the frozen Stability VAE runs each step — no pre-encode pass. Offline 8-channel latent zips still work and are auto-detected |
 | **Checkpointing** | full resumable `training-state-*.pt` (one per tick) | **EMA-only `.pt` state-dict inference snapshots** `edm2-snapshot-<kimg>[-<std>]-inference.pt`, written atomically each snapshot tick **and always at the last tick**, pruned to `--snapshot-keep-last` (default 3). Every snapshot carries `{n_classes, resolution, class_names, cur_nimg}`. **No resume, no best-model, no rolling latest** — the newest snapshot is the final model |
-| **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**, reference from **raw dataset pixels**: `combra_fid10k`, `combra_cmmd10k`, `combra_fd_dinov2_10k` + angle-density metrics |
+| **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**, reference from **raw dataset pixels**: `combra_fid`, `combra_cmmd`, `combra_fd_dinov2` + angle-density metrics |
 | **Generation** | flat `<seed>.png` | per-class HDF5 (`edm2-gen-images --classes … --samples-per-class …`) in the wc_cv angle-pipeline `RankH5Writer` layout, self-spawning `--gpus` (no torchrun) |
 | **Samplers** | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval and generation** |
 | **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points; pyproject is the only dependency declaration (no `requirements.txt`, no Hydra) |
@@ -48,9 +48,12 @@ pip install -e '.[combra]'      # omit [combra] to train without inline combra m
 ```
 
 `combra` (the WC-Co computer-vision metrics library) is optional; the import is
-guarded, so training runs unchanged without it. Its base dependencies cover every
-image metric — FID (pytorch-fid), CMMD (open-clip-torch), FD-DINOv2 (torch.hub
-DINOv2). It lives in a **private** repo, so the `[combra]` extra clones it over
+guarded, so training runs unchanged without it. The image metrics — FID
+(pytorch-fid), CMMD (open-clip-torch), FD-DINOv2 (torch.hub DINOv2) — need combra's
+**`[metrics]` extra**, which the `[combra]` extra here requests for you: combra 0.5.0
+moved that torch stack out of its base dependencies, so a bare `combra` install
+leaves all three returning `nan`. combra also floors Python at **3.12**, which is why
+this package does too. It lives in a **private** repo, so the `[combra]` extra clones it over
 `git+https` and only succeeds when you are authenticated to GitHub — sign in once
 with the GitHub CLI and `pip` inherits its credential helper:
 
@@ -196,8 +199,13 @@ angle extraction is sharded per rank and gathered to rank 0, which computes the
 distances — so the metrics are computed on all GPU ranks, matching DiffiT-v2.
 Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:
 
-- `combra_fid10k` (InceptionV3 FID), `combra_cmmd10k` (CLIP-MMD), `combra_fd_dinov2_10k` (DINOv2 Fréchet)
+- `combra_fid` (InceptionV3 FID), `combra_cmmd` (CLIP-MMD), `combra_fd_dinov2` (DINOv2 Fréchet), `combra_fid_best` (running best), `combra_num_fid_samples` (the count the run used)
 - angle-density metrics: `combra_w1`, `combra_w2`, `combra_circular_w1/w2`, `combra_mu1/mu2`, `combra_sigma1/sigma2`, `combra_amp1/amp2`
+
+Every metric row in `stats.jsonl` carries `Progress/kimg` alongside the `Metrics/*`
+keys, so `combra.metrics.load_fid_by_kimg` reads a run's FID history directly. (The
+keys used to carry a literal `10k` suffix that never tracked `--num-fid-samples`, and
+sat in a row without `Progress/kimg`; neither is true any more.)
 
 The offline `calculate_metrics.py` (`edm2-eval`) FID / FD-DINOv2 evaluator is kept
 unchanged for standalone reference-stats evaluation.

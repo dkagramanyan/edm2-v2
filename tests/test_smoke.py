@@ -7,6 +7,7 @@
 guard. No GPU, dataset, or external weights required."""
 
 import numpy as np
+import pytest
 import torch
 
 from training import samplers
@@ -63,13 +64,68 @@ def test_precond_forward_contract():
 
 
 def test_combra_import_guard():
+    # Not "is it a bool" -- that passed whichever way it went, which is precisely how
+    # a real breakage (combra 0.5.0 moving three symbols) survived a whole release.
+    # If combra is importable at all, the integration must be live.
+    import importlib.util
+
     from training import metrics
-    assert isinstance(metrics.HAS_COMBRA, bool)
+
+    if importlib.util.find_spec("combra") is None:
+        assert metrics.HAS_COMBRA is False
+        return
+    assert metrics.HAS_COMBRA is True, (
+        f"combra is installed but this repo cannot use it: {metrics.COMBRA_IMPORT_ERROR}"
+    )
+
+
+def _grain_image(seed, size=96, n=10):
+    """A small synthetic microstructure: filled polygons on a light ground.
+
+    combra's angle pipeline measures vertex angles on grain contours, so its input
+    has to *have* contours. Random noise has none — it yields an empty angle density
+    and the smoke test fails for a reason that has nothing to do with the install.
+    """
+    import cv2
+
+    rng = np.random.default_rng(seed)
+    img = np.full((size, size), 255, np.uint8)
+    for _ in range(n):
+        centre = rng.integers(20, size - 20, size=2)
+        pts = centre + rng.integers(-15, 15, size=(int(rng.integers(3, 7)), 2))
+        cv2.fillPoly(img, [pts.astype(np.int32)], int(rng.integers(0, 120)))
+    return np.stack([img] * 3, axis=-1)
 
 
 def test_combra_smoke_when_available():
     from training import metrics
     if not metrics.HAS_COMBRA:
         return  # combra optional; nothing to check
-    imgs = np.random.randint(0, 256, size=(4, 16, 16, 3), dtype=np.uint8)
-    metrics.combra_smoke_test(imgs, torch.device("cpu"), log_fn=lambda *a: None)
+    imgs = np.stack([_grain_image(i) for i in range(4)])
+    try:
+        metrics.combra_smoke_test(imgs, torch.device("cpu"), log_fn=lambda *a: None)
+    except RuntimeError as e:
+        # The smoke test is *meant* to fail loudly when an image-feature backend is
+        # unusable -- that is its whole job before a training run. On a CI box with no
+        # network the CLIP / DINOv2 weights cannot be fetched, which is an environment
+        # limitation rather than a defect, so skip on exactly that. Any other failure
+        # (including an empty angle density) is a real one and still fails the test.
+        if "non-finite" not in str(e):
+            raise
+        pytest.skip(f"image-feature backends unavailable offline: {e}")
+
+
+def test_combra_angle_metrics_run_offline():
+    """The angle-density half needs no backbone, so it must work with no network."""
+    from training import metrics
+    if not metrics.HAS_COMBRA:
+        return
+    from combra.metrics import angle_density_metrics_from_pooled, images_to_pooled_angles
+
+    ref = np.stack([_grain_image(i) for i in range(4)])
+    gen = np.stack([_grain_image(100 + i) for i in range(4)])
+    out = angle_density_metrics_from_pooled(
+        images_to_pooled_angles(ref), images_to_pooled_angles(gen)
+    )
+    for key in ("w1", "w2", "circular_w1", "circular_w2", "mu1", "sigma1", "amp1"):
+        assert np.isfinite(out[key]), f"{key} is not finite"
