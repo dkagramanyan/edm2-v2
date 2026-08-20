@@ -144,6 +144,50 @@ def _generate_grid(eval_net, encoder, gnet, device, *, sampler, num_steps, guida
 #----------------------------------------------------------------------------
 # Main training loop.
 
+def _write_run_hparams(run_dir, writer, metrics):
+    """Record this run's configuration in TensorBoard's HPARAMS tab (§7).
+
+    The config is read back from ``training_options.json``, already written by the
+    launcher, so nothing has to be threaded through the training-loop signature.
+    Paired with the run's final metrics this is what makes runs comparable in
+    TensorBoard: without it the curves are there but nothing says which configuration
+    produced them.
+    """
+    import json
+    import os
+
+    try:
+        from combra.io import write_hparams
+    except ImportError:
+        return  # combra is optional; the curves are still logged
+    path = os.path.join(run_dir, 'training_options.json')
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        config = json.load(fh)
+    write_hparams(writer, config, metrics)
+
+
+def build_metrics_row(stats_metrics, cur_nimg, cur_tick, timestamp, elapsed, eval_sec=None):
+    """The combra metrics row for ``stats.jsonl``.
+
+    Carries the ``Metrics/*`` values AND ``Progress/kimg`` on the same line, because
+    ``combra.metrics.load_fid_by_kimg`` matches a record only when both are present
+    and both are plain JSON scalars. Kept as a function so a test can exercise the
+    real row without running a training loop.
+    """
+    row = {f'Metrics/{name}': float(value) for name, value in stats_metrics.items()}
+    if eval_sec is not None:
+        row['Timing/eval_sec'] = eval_sec
+    row['Progress/kimg'] = cur_nimg / 1e3
+    row['Progress/tick'] = cur_tick
+    row['timestamp'] = timestamp
+    row['wall_time'] = elapsed
+    row['datetime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return row
+
+#----------------------------------------------------------------------------
+
 def training_loop(
     dataset_kwargs      = dict(class_name='training.dataset.ImageFolderDataset', path=None),
     encoder_kwargs      = dict(class_name='training.encoders.StabilityVAEEncoder'),
@@ -277,7 +321,13 @@ def training_loop(
         local_ref = combra_mod.load_reference_shard(dataset_obj, ref_count, batch_gpu, device, rank, world_size, seed=seed)
         if rank == 0:
             combra_mod.combra_smoke_test(local_ref, device, dist.print0)
-        combra_ref = combra_mod.precompute_combra_reference(local_ref, device, rank, world_size)
+        # (reference, ok): ok is rank-uniform, so gating on it is safe -- `combra_ref`
+        # is None on every non-zero rank whether or not anything failed.
+        combra_ref, combra_ok = combra_mod.precompute_combra_reference(
+            local_ref, device, rank, world_size)
+        if not combra_ok:
+            use_combra = False
+            dist.print0('WARNING: combra reference precompute failed; metrics disabled.')
 
     # Save a grid of real images (raw pixels) and an initial (pre-training) fakes grid.
     pixel_resolution = None
@@ -291,8 +341,8 @@ def training_loop(
                                     sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
         init_canvas = save_image_grid(init_fakes, os.path.join(run_dir, 'fakes_init.png'), grid_size)
         if sw is not None:
-            sw.add_image('reals', reals_canvas, global_step=0, dataformats='HWC')
-            sw.add_image('fakes', init_canvas, global_step=0, dataformats='HWC')
+            sw.add_image('Reals', reals_canvas, global_step=0, dataformats='HWC')
+            sw.add_image('Fakes', init_canvas, global_step=0, dataformats='HWC')
             sw.flush()
         net.train()
 
@@ -357,8 +407,8 @@ def training_loop(
                 if sw is not None:
                     for name, value in collected:
                         if np.isfinite(value):
-                            sw.add_scalar(name, float(value), global_step=int(state.cur_nimg / 1e3), walltime=state.total_elapsed_time)
-                    sw.add_scalar('Progress/tick', float(cur_tick), global_step=int(state.cur_nimg / 1e3), walltime=state.total_elapsed_time)
+                            sw.add_scalar(name, float(value), global_step=state.cur_nimg, walltime=state.total_elapsed_time)
+                    sw.add_scalar('Progress/tick', float(cur_tick), global_step=state.cur_nimg, walltime=state.total_elapsed_time)
                     sw.flush()
 
         # Evaluate combra metrics (all ranks generate their shard; rank 0 aggregates)
@@ -371,6 +421,7 @@ def training_loop(
             eval_net = _primary_ema_net(ema, net)
             eval_net.eval()
             if use_combra:
+                eval_start = time.time()
                 stats_metrics = combra_mod.compute_combra_metrics(
                     eval_net, encoder, combra_ref, num_fid_samples, batch_gpu, device, rank, world_size,
                     sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance,
@@ -389,12 +440,9 @@ def training_loop(
                     # status block runs BEFORE this one, so folding would stamp these
                     # metrics with the following tick's kimg.
                     now = time.time()
-                    row = {f'Metrics/{name}': float(value) for name, value in stats_metrics.items()}
-                    row['Progress/kimg'] = state.cur_nimg / 1e3
-                    row['Progress/tick'] = cur_tick
-                    row['timestamp'] = now
-                    row['wall_time'] = state.total_elapsed_time
-                    row['datetime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    row = build_metrics_row(stats_metrics, state.cur_nimg, cur_tick,
+                                            now, state.total_elapsed_time,
+                                            eval_sec=time.time() - eval_start)
                     stats_jsonl.write(json.dumps(row) + '\n')
                     stats_jsonl.flush()
                     if sw is not None:
@@ -410,7 +458,7 @@ def training_loop(
                                        num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
                 fakes_canvas = save_image_grid(fakes, os.path.join(run_dir, f'fakes{state.cur_nimg // 1000:06d}.png'), grid_size)
                 if sw is not None:
-                    sw.add_image('fakes', fakes_canvas, global_step=int(state.cur_nimg / 1e3), dataformats='HWC')
+                    sw.add_image('Fakes', fakes_canvas, global_step=state.cur_nimg, dataformats='HWC')
                     sw.flush()
                 net.train()
 
@@ -454,7 +502,8 @@ def training_loop(
 
         # Run optimizer and update weights.
         lr = dnnlib.util.call_func_by_name(cur_nimg=state.cur_nimg, batch_size=batch_size, **lr_kwargs)
-        training_stats.report('Loss/learning_rate', lr)
+        # §7 puts learning rates under LearningRate/, not Loss/.
+        training_stats.report('LearningRate/lr', lr)
         for g in optimizer.param_groups:
             g['lr'] = lr
         if force_finite:
@@ -469,6 +518,8 @@ def training_loop(
             ema.update(cur_nimg=state.cur_nimg, batch_size=batch_size)
         cumulative_training_time += time.time() - batch_start_time
 
+    if rank == 0 and sw is not None:
+        _write_run_hparams(run_dir, sw, {'Metrics/combra_fid_best': float(best_fid)})
     if stats_jsonl is not None:
         stats_jsonl.close()
 

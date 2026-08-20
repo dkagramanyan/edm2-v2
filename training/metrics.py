@@ -14,32 +14,30 @@ computes the final distances -- so the combra metrics are computed on every rank
 guarded so training runs unchanged when it is not installed.
 """
 
-import os
 
 import numpy as np
 import torch
-import torch.distributed as dist
 
 # Optional combra integration. Guarded so training runs without it.
+#
+# Only what this module actually calls is imported: the sharded harness itself now
+# lives in `combra.metrics.distributed`, so the feature extractors and distance
+# helpers it needs are combra's own dependency, covered by combra's tests rather
+# than re-listed here.
 try:
-    from combra.metrics import (
-        angle_density_metrics_from_pooled as _combra_angle_metrics_from_pooled,
-        cmmd_features as _combra_cmmd_features,
-        cmmd_from_features as _combra_cmmd_from_features,
-        compute_all_metrics as _combra_compute_all_metrics,
-        fd_dinov2_features as _combra_fd_dinov2_features,
-        fid_features as _combra_fid_features,
-        frechet_from_features as _combra_frechet_from_features,
-        images_to_pooled_angles as _combra_images_to_pooled_angles,
+    from combra.metrics import self_test as _combra_self_test
+    from combra.metrics.distributed import (
+        distributed_metrics as _combra_distributed_metrics_impl,
+        gather_generated as _combra_gather_generated,
+        precompute_reference as _combra_precompute_reference,
     )
 
     HAS_COMBRA = True
     COMBRA_IMPORT_ERROR = None
 except ImportError as _combra_exc:
-    _combra_angle_metrics_from_pooled = _combra_images_to_pooled_angles = None
-    _combra_fid_features = _combra_cmmd_features = _combra_fd_dinov2_features = None
-    _combra_cmmd_from_features = _combra_frechet_from_features = None
-    _combra_compute_all_metrics = None
+    _combra_self_test = _combra_precompute_reference = None
+    _combra_gather_generated = _combra_gather_pooled_angles = None
+    _combra_distributed_metrics_impl = None
     HAS_COMBRA = False
     # Keep the reason. "combra is not installed" is the wrong diagnosis when combra
     # IS installed but has moved a symbol -- that misdirection is exactly how this
@@ -50,110 +48,16 @@ except ImportError as _combra_exc:
 # to carry a "10k" suffix that stayed 10k whatever --num-fid-samples said, so every
 # chart built from them was mislabelled. The sample count is logged once instead, as
 # Metrics/combra_num_fid_samples.
-_COMBRA_IMAGE_METRICS = ("fid", "cmmd", "fd_dinov2")
+#----------------------------------------------------------------------------
+# The shard -> extract -> gather -> distance harness now lives in combra
+# (`combra.metrics.distributed`), so all four model repos share one implementation
+# instead of four copies that had drifted apart. What stays here is the part that is
+# genuinely EDM2-specific: turning latents into uint8 RGB, and generating a shard.
+
+precompute_combra_reference = _combra_precompute_reference
 
 #----------------------------------------------------------------------------
-# Feature extraction / distance dispatch (combra defaults, so the distributed
-# result matches a single-GPU compute_all_metrics(image_metrics=True)).
 
-def _combra_extract_features(name, images, device):
-    if name == "fid":
-        return _combra_fid_features(images, device=device).astype(np.float32)
-    if name == "cmmd":
-        return _combra_cmmd_features(images, device=device).astype(np.float32)
-    return _combra_fd_dinov2_features(images, device=device).astype(np.float32)
-
-def _combra_distance(name, ref_features, gen_features):
-    if name == "fid":
-        return _combra_frechet_from_features(ref_features, gen_features)
-    if name == "cmmd":
-        return _combra_cmmd_from_features(ref_features, gen_features)
-    return _combra_frechet_from_features(ref_features, gen_features)
-
-#----------------------------------------------------------------------------
-# Cross-rank gathering.
-
-def _gather_feature_rows(local, device, rank, world_size):
-    """Gather per-rank feature rows ``[n_i, D]`` to rank 0, concatenated in rank
-    order (None on other ranks). Ranks may hold different ``n_i``, so each block is
-    padded to the max before the collective gather and trimmed on rank 0."""
-    if world_size == 1:
-        return local
-
-    t = torch.from_numpy(np.ascontiguousarray(local)).to(device)
-    count = torch.tensor([t.shape[0]], device=device, dtype=torch.long)
-    all_counts = [torch.zeros_like(count) for _ in range(world_size)]
-    dist.all_gather(all_counts, count)
-
-    max_count = max(c.item() for c in all_counts)
-    if t.shape[0] < max_count:
-        pad = torch.zeros(max_count - t.shape[0], *t.shape[1:], device=device, dtype=t.dtype)
-        t = torch.cat([t, pad], 0)
-
-    if rank == 0:
-        gathered = [torch.zeros_like(t) for _ in range(world_size)]
-        dist.gather(t, gathered, dst=0)
-        rows = [g[:all_counts[i].item()].cpu().numpy() for i, g in enumerate(gathered)]
-        return np.concatenate(rows, axis=0)
-    dist.gather(t, dst=0)
-    return None
-
-def _combra_angle_workers(world_size):
-    # Per-rank CPU processes for the angle extraction, which was running
-    # single-threaded here and is the most expensive part of an eval at 512px.
-    # Divided by the rank count so an 8-GPU node does not oversubscribe itself.
-    return max(1, min(32, (os.cpu_count() or 1) // max(1, world_size)))
-
-
-def _gather_combra_gen_features(local_images, device, rank, world_size):
-    """Each rank extracts the three image-feature sets from its own generated shard;
-    rows are gathered to rank 0. ``{metric: [N, D]}`` on rank 0, ``{metric: None}``
-    elsewhere (every rank still runs the collective for each metric, same order)."""
-    return {
-        name: _gather_feature_rows(
-            _combra_extract_features(name, local_images, device), device, rank, world_size
-        )
-        for name in _COMBRA_IMAGE_METRICS
-    }
-
-def _gather_pooled_angles(local_images, device, rank, world_size):
-    """Each rank extracts its shard's pooled vertex angles; the 1-D arrays are
-    gathered to rank 0 (concatenated). Pooled angles from disjoint shards
-    concatenate directly, so the rank-0 histogram matches a single-GPU
-    ``images_to_pooled_angles`` over the full set."""
-    local = np.asarray(
-        _combra_images_to_pooled_angles(local_images, workers=_combra_angle_workers(world_size)),
-        np.float32,
-    ).reshape(-1, 1)
-    gathered = _gather_feature_rows(local, device, rank, world_size)
-    return gathered.reshape(-1) if gathered is not None else None
-
-def precompute_combra_reference(local_ref_images, device, rank, world_size):
-    """All-ranks: extract pooled angles + three feature sets from this rank's
-    reference shard and gather to rank 0. ``{"angles": [M], "feat": {name: [N, D]}}``
-    on rank 0 (None elsewhere). Called once before the training loop; the cached
-    result is reused every eval tick."""
-    angles = _gather_pooled_angles(local_ref_images, device, rank, world_size)
-    feat = {
-        name: _gather_feature_rows(
-            _combra_extract_features(name, local_ref_images, device), device, rank, world_size
-        )
-        for name in _COMBRA_IMAGE_METRICS
-    }
-    if rank == 0:
-        return {"angles": angles, "feat": feat}
-    return None
-
-def _combra_distributed_metrics(combra_ref, gen_angles, gen_feats):
-    """Rank-0 combra metrics from already-gathered inputs: angle-density /
-    Gaussian-fit metrics from pooled angles + image-feature distances from gathered
-    features. Equivalent to ``compute_all_metrics(image_metrics=True)`` but sharded."""
-    metrics = dict(_combra_angle_metrics_from_pooled(combra_ref["angles"], gen_angles))
-    for name in _COMBRA_IMAGE_METRICS:
-        metrics[name] = _combra_distance(name, combra_ref["feat"][name], gen_feats[name])
-    return metrics
-
-#----------------------------------------------------------------------------
 # EDM-specific helpers: turn dataset/model outputs into RGB (NHWC uint8) batches.
 
 def _decode_to_nhwc_uint8(encoder, latents):
@@ -223,13 +127,14 @@ def compute_combra_metrics(net, encoder, combra_ref, num_samples, batch, device,
     local_fakes = generate_fake_shard(net, encoder, gnet, num_samples, batch, device,
                                        rank, world_size, sampler=sampler,
                                        num_steps=num_steps, guidance=guidance, seed=seed)
-    gen_feats = _gather_combra_gen_features(local_fakes, device, rank, world_size)
-    gen_angles = _gather_pooled_angles(local_fakes, device, rank, world_size)
+    gen_feats, gen_angles = _combra_gather_generated(local_fakes, device, rank, world_size)
     if rank != 0:
         return None
     metrics = {}
     try:
-        raw = _combra_distributed_metrics(combra_ref, gen_angles, gen_feats)
+        # device= so the CMMD reduction runs where the features were extracted; left
+        # unset it resolves independently and a CPU extraction reduces on CUDA.
+        raw = _combra_distributed_metrics_impl(combra_ref, gen_angles, gen_feats, device=device)
         for k, v in raw.items():
             metrics[f"combra_{k}"] = float(v)
         metrics["combra_num_fid_samples"] = float(num_samples)
@@ -240,22 +145,23 @@ def compute_combra_metrics(net, encoder, combra_ref, num_samples, batch, device,
 #----------------------------------------------------------------------------
 
 def combra_smoke_test(ref_images, device, log_fn=print):
-    """Verify combra metrics actually compute (not just import) before training.
-    Runs the real pipeline once on a tiny reference slice; raises on failure."""
+    """Verify the combra metrics actually *compute* before training, not just import.
+
+    Delegates to ``combra.metrics.self_test``, which since combra 0.8 takes
+    ``strict=True`` (require the image-feature metrics to be finite, rather than
+    tolerating ``nan``) and ``images=`` (score a real reference slice against itself).
+    That is what this repo's private copy used to do by hand; models-API §6 always
+    specified one shared implementation, and now there is one.
+    """
     sample = ref_images[: min(4, len(ref_images))]
     try:
-        metrics = _combra_compute_all_metrics(
-            sample, sample, device=device, image_metrics=True, reference_cache={},
+        metrics = _combra_self_test(
+            images=sample, device=device, image_metrics=True, strict=True
         )
-    except Exception as e:  # noqa: BLE001
+    except RuntimeError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- surface any backend failure the same way
         raise RuntimeError(f"combra metrics smoke test failed to run: {e}") from e
-    bad = sorted(k for k, v in metrics.items() if not np.isfinite(v))
-    if bad:
-        raise RuntimeError(
-            f"combra metrics smoke test produced non-finite values for {bad} -- a "
-            "metric backend or optional dependency is missing/broken. Fix the install "
-            "or pass --combra-metrics False."
-        )
-    log_fn("combra metrics smoke test passed")
+    log_fn(f"combra metrics smoke test passed ({len(metrics)} metrics computed)")
 
 #----------------------------------------------------------------------------
