@@ -266,7 +266,9 @@ def calculate_metrics_from_stats(
         if verbose:
             print(f'Calculating {metric}...')
         m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
-        s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
+        # scipy >= 1.18 removed sqrtm's `disp`; without it sqrtm returns the
+        # matrix alone on every version.
+        s = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']))
         value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
         results[metric] = value
         if verbose:

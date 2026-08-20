@@ -10,7 +10,7 @@ while [[ ! -f "$REPO_DIR/pyproject.toml" && "$REPO_DIR" != / ]]; do
 done
 cd "$REPO_DIR"
 
-conda activate edm2
+conda activate edm2-v2
 export TORCH_CUDA_ARCH_LIST="9.0"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1

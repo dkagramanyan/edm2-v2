@@ -17,7 +17,7 @@ cd "$REPO_DIR"
 # Environment (env name = repo name). EDM2 is pure PyTorch (no custom CUDA-op
 # compilation), so no system CUDA module is required; --gpus spawns the workers
 # internally (no torchrun).
-conda activate edm2
+conda activate edm2-v2
 export TORCH_CUDA_ARCH_LIST="9.0"
 
 # Offline-cluster contract: backbones (SD-VAE, and combra's InceptionV3 / CLIP /

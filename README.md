@@ -41,8 +41,8 @@ https://arxiv.org/abs/2406.02507
 the CUDA 13.x wheels, then the package:
 
 ```bash
-conda create -n edm2 python=3.12 -y
-conda activate edm2
+conda create -n edm2-v2 python=3.12 -y
+conda activate edm2-v2
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu132
 pip install -e '.[combra]'      # omit [combra] to train without inline combra metrics
 ```
