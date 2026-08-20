@@ -6,7 +6,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
-- **combra is pinned to a tag (`@v0.8.1`) instead of tracking `main`.** Unpinned, every
+- **`--max-images N` produced a single-class dataset.** `open_image_folder` /
+  `open_image_zip` truncated a sorted (therefore class-grouped) file list, so a cap
+  took every image from the alphabetically first class. The capped set trained a
+  1-class model and `edm2-gen-images --classes=1,2...` then failed with "index out of
+  range for a 1-class model". `stratified_subset` now keys on the label each image
+  will carry and picks round-robin, warning when the cap is below the class count.
+  Reproduced first: a 3-class source capped at 6 gave labels `[0,0,0,0,0,0]` against
+  `class_names ['a','b','c']`; now `[0,0,1,1,2,2]`. The identical bug in StyleSwin
+  was fixed in the same pass.
+- **An unreachable VAE failed with a diffusers-internal message.** Offline,
+  `load_stability_vae` died with "does not appear to have a file named config.json"
+  several frames below anything an edm2 caller recognises. It now names the cache it
+  actually used -- `~/.cache/dnnlib/diffusers`, *not* `~/.cache/huggingface`, because
+  it overrides `HF_HOME` -- and gives the two ways forward.
+- **Every run ended with "destroy_process_group() was not called before program
+  exit".** `distributed.init()` now registers an `atexit` teardown, and only when
+  that call created the process group.
+- **combra is pinned to a tag (`@v0.9.1`) instead of tracking `main`.** Unpinned, every
   fresh env resolved whatever combra `main` was that day, so the FID / CMMD / FD-DINOv2 /
   angle numbers a run is judged on could change with no signal and no record. combra
   0.8.0 also stamps `combra/version` into this run's TensorBoard HPARAMS, so the metric
