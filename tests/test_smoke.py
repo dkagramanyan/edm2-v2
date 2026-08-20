@@ -101,7 +101,13 @@ def test_combra_smoke_when_available():
     from training import metrics
     if not metrics.HAS_COMBRA:
         return  # combra optional; nothing to check
-    imgs = np.stack([_grain_image(i) for i in range(4)])
+    # A 6-parameter bimodal fit needs enough vertices to constrain it. Four
+    # 96px/10-polygon images give only ~70 vertex angles, and the second mode then
+    # fits as a ~200 deg-wide pedestal -- combra reports that as nan rather than
+    # dividing by a phantom. 256px x 80 polygons gives ~740 angles, stable across
+    # seeds. (Real reference images are not affected: one 768px micrograph already
+    # yields ~300 angles and fits cleanly.)
+    imgs = np.stack([_grain_image(i, size=256, n=80) for i in range(4)])
     try:
         metrics.combra_smoke_test(imgs, torch.device("cpu"), log_fn=lambda *a: None)
     except RuntimeError as e:
@@ -122,8 +128,14 @@ def test_combra_angle_metrics_run_offline():
         return
     from combra.metrics import angle_density_metrics_from_pooled, images_to_pooled_angles
 
-    ref = np.stack([_grain_image(i) for i in range(4)])
-    gen = np.stack([_grain_image(100 + i) for i in range(4)])
+    # A 6-parameter bimodal fit needs enough vertices to constrain it. Four
+    # 96px/10-polygon images give only ~70 vertex angles, and the second mode then
+    # fits as a ~200 deg-wide pedestal -- combra reports that as nan rather than
+    # dividing by a phantom. 256px x 80 polygons gives ~740 angles, stable across
+    # seeds. (Real reference images are not affected: one 768px micrograph already
+    # yields ~300 angles and fits cleanly.)
+    ref = np.stack([_grain_image(i, size=256, n=80) for i in range(4)])
+    gen = np.stack([_grain_image(100 + i, size=256, n=80) for i in range(4)])
     out = angle_density_metrics_from_pooled(
         images_to_pooled_angles(ref), images_to_pooled_angles(gen)
     )

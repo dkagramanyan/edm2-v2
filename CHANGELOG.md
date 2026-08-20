@@ -6,6 +6,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- **The two combra smoke fixtures were too small to fit a bimodal Gaussian.**
+  Four 96px/10-polygon synthetic images yield only ~70 vertex angles, and the
+  second mode then fits as a ~200 deg-wide pedestal, which combra reports as
+  `nan`. `test_combra_angle_metrics_run_offline` failed on it and
+  `test_combra_smoke_when_available` silently *skipped*, mistaking it for an
+  offline-backend failure. Both now use 256px/80-polygon images (~740 angles).
+  Real reference images were never affected -- a single 768px micrograph
+  already yields ~300 angles and fits cleanly.
 - **The combra contract test fed a unimodal sample to a bimodal-fit metric.**
   `test_angle_metrics_run_on_pooled_angles` drew two near-identical normals
   (mu 120 and 126), so the second Gaussian had no mode to sit on. combra now
