@@ -5,6 +5,7 @@
 # You should have received a copy of the license along with this
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
+import atexit
 import os
 import socket
 
@@ -14,6 +15,12 @@ import torch.distributed
 from . import training_stats
 
 _sync_device = None
+
+#----------------------------------------------------------------------------
+
+def _destroy():
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 #----------------------------------------------------------------------------
 
@@ -41,6 +48,12 @@ def init():
         init_method = 'env://?use_libuv=False' if os.name == 'nt' else 'env://'
         torch.distributed.init_process_group(backend=backend, init_method=init_method)
         torch.cuda.set_device(int(os.environ.get('LOCAL_RANK', '0')))
+        # Nothing tore the group down, so every run -- including every
+        # single-GPU one -- ended with "destroy_process_group() was not called
+        # before program exit, which can leak resources". Registered only when
+        # this call created the group, so a caller that set one up itself keeps
+        # ownership of it.
+        atexit.register(_destroy)
 
     _sync_device = torch.device('cuda') if get_world_size() > 1 else None
     training_stats.init_multiprocessing(rank=get_rank(), sync_device=_sync_device)

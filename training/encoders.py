@@ -161,9 +161,24 @@ def load_stability_vae(vae_name='stabilityai/sd-vae-ft-mse', device=torch.device
     try:
         # First try with local_files_only to avoid consulting tfhub metadata if the model is already in cache.
         vae = diffusers.models.AutoencoderKL.from_pretrained(vae_name, cache_dir=cache_dir, local_files_only=True)
-    except:
+    except Exception:
         # Could not load the model from cache; try without local_files_only.
-        vae = diffusers.models.AutoencoderKL.from_pretrained(vae_name, cache_dir=cache_dir)
+        try:
+            vae = diffusers.models.AutoencoderKL.from_pretrained(vae_name, cache_dir=cache_dir)
+        except Exception as err:
+            # Offline (or with a partial cache) diffusers fails deep inside its own
+            # loader with "does not appear to have a file named config.json" or
+            # LocalEntryNotFoundError, several frames below anything an edm2 caller
+            # recognises. Say what is actually wrong and what to do about it.
+            raise RuntimeError(
+                f'Could not load the latent VAE {vae_name!r}.\n'
+                f'  Looked in: {cache_dir}\n'
+                f'  Note this is NOT ~/.cache/huggingface -- HF_HOME is overridden above, '
+                f'so a copy cached by another tool is not visible here.\n'
+                f'Fix: run `edm2-download-models` once with network access, or use an '
+                f'RGB `edm2-img64-*` preset, which needs no VAE.\n'
+                f'Underlying error: {type(err).__name__}: {err}'
+            ) from err
     return vae.eval().requires_grad_(False).to(device)
 
 #----------------------------------------------------------------------------

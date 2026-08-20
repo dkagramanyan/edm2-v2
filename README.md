@@ -62,11 +62,24 @@ gh auth login        # github.com → HTTPS
 pip install -e '.[combra]'
 ```
 
+On an air-gapped node `pip install -e .` fails with *"Could not find a version
+that satisfies setuptools>=61"* — build isolation tries to fetch its own build
+backend. Reuse the env's instead:
+
+```bash
+pip install -e . --no-build-isolation
+```
+
 Pre-fetch the VAE and metric backbones for offline nodes:
 
 ```bash
 edm2-download-models
 ```
+
+The VAE is cached under `~/.cache/dnnlib/diffusers`, **not** the standard
+`~/.cache/huggingface` — `load_stability_vae` overrides `HF_HOME`, so a copy another
+tool cached is not visible here. Without it, latent presets (`edm2-img256/512/1024-*`)
+cannot run; the RGB `edm2-img64-*` presets need no VAE at all.
 
 ## Class conditioning — how the model is made conditional
 
