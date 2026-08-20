@@ -52,6 +52,46 @@ def maybe_min(a: int, b: Optional[int]) -> int:
 
 #----------------------------------------------------------------------------
 
+def stratified_subset(input_images: list, class_of: Callable[[str], object], limit: int) -> list:
+    """Spread a `--max-images` cap across classes instead of taking the first `limit`.
+
+    `class_of` returns the label an image will be written with. The image list is
+    sorted, so it is grouped by class folder: a plain truncation takes every image
+    from the alphabetically first class and none from the rest.
+    The capped set then trains a single-class model on a multi-class source, and
+    `edm2-gen-images --classes=1,2...` fails with "index out of range for a 1-class
+    model". Picks round-robin instead, so a cap of N over C classes gives each
+    class N/C images (the leftovers go to the classes that have the most images).
+    """
+    groups: dict = {}
+    for fname in input_images:
+        groups.setdefault(class_of(fname), []).append(fname)
+    if len(groups) < 2:
+        return input_images[:limit]
+
+    keys = sorted(groups, key=lambda k: (k is None, k))
+    picked: list = []
+    depth = 0
+    while len(picked) < limit:
+        added = 0
+        for key in keys:
+            if depth < len(groups[key]):
+                picked.append(groups[key][depth])
+                added += 1
+                if len(picked) == limit:
+                    break
+        if added == 0:
+            break
+        depth += 1
+
+    covered = {class_of(fname) for fname in picked}
+    if len(covered) < len(groups):
+        print(f'Warning: --max-images={limit} is smaller than the {len(groups)} classes in the '
+              f'source, so only {len(covered)} of them are represented.')
+    return sorted(picked)
+
+#----------------------------------------------------------------------------
+
 def file_ext(name: Union[str, Path]) -> str:
     return str(name).split('.')[-1]
 
@@ -100,6 +140,11 @@ def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, It
             labels = {arch_fname: toplevel_indices[toplevel_name] for arch_fname, toplevel_name in toplevel_names.items()}
             class_names = sorted_names
 
+    if max_idx < len(input_images):
+        input_images = stratified_subset(
+            input_images, lambda f: labels.get(arch_fnames[f]), max_idx)
+        max_idx = len(input_images)
+
     def iterate_images():
         for idx, fname in enumerate(input_images):
             img = np.array(PIL.Image.open(fname).convert('RGB'))
@@ -125,6 +170,10 @@ def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[
                 if data is not None:
                     labels = {x[0]: x[1] for x in data}
                 class_names = meta.get('class_names')
+
+    if max_idx < len(input_images):
+        input_images = stratified_subset(input_images, labels.get, max_idx)
+        max_idx = len(input_images)
 
     def iterate_images():
         with zipfile.ZipFile(source, mode='r') as z:
