@@ -14,6 +14,8 @@ computes the final distances -- so the combra metrics are computed on every rank
 guarded so training runs unchanged when it is not installed.
 """
 
+import os
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -26,25 +28,29 @@ try:
         cmmd_from_features as _combra_cmmd_from_features,
         compute_all_metrics as _combra_compute_all_metrics,
         fd_dinov2_features as _combra_fd_dinov2_features,
-        fd_dinov2_from_features as _combra_fd_dinov2_from_features,
         fid_features as _combra_fid_features,
-        fid_from_features as _combra_fid_from_features,
+        frechet_from_features as _combra_frechet_from_features,
         images_to_pooled_angles as _combra_images_to_pooled_angles,
     )
 
     HAS_COMBRA = True
-except ImportError:
+    COMBRA_IMPORT_ERROR = None
+except ImportError as _combra_exc:
     _combra_angle_metrics_from_pooled = _combra_images_to_pooled_angles = None
     _combra_fid_features = _combra_cmmd_features = _combra_fd_dinov2_features = None
-    _combra_fid_from_features = _combra_cmmd_from_features = _combra_fd_dinov2_from_features = None
+    _combra_cmmd_from_features = _combra_frechet_from_features = None
     _combra_compute_all_metrics = None
     HAS_COMBRA = False
+    # Keep the reason. "combra is not installed" is the wrong diagnosis when combra
+    # IS installed but has moved a symbol -- that misdirection is exactly how this
+    # integration stayed broken for a whole combra release.
+    COMBRA_IMPORT_ERROR = _combra_exc
 
-# combra image-feature metrics carry their generated-sample count in the key,
-# matching the SAN-v2 / DiffiT-v2 reference dashboards. Angle-density metrics keep
-# their bare names.
+# combra metric keys are bare: combra_fid, combra_cmmd, combra_fd_dinov2. They used
+# to carry a "10k" suffix that stayed 10k whatever --num-fid-samples said, so every
+# chart built from them was mislabelled. The sample count is logged once instead, as
+# Metrics/combra_num_fid_samples.
 _COMBRA_IMAGE_METRICS = ("fid", "cmmd", "fd_dinov2")
-_COMBRA_IMAGE_RENAME = {"fid": "fid10k", "cmmd": "cmmd10k", "fd_dinov2": "fd_dinov2_10k"}
 
 #----------------------------------------------------------------------------
 # Feature extraction / distance dispatch (combra defaults, so the distributed
@@ -59,10 +65,10 @@ def _combra_extract_features(name, images, device):
 
 def _combra_distance(name, ref_features, gen_features):
     if name == "fid":
-        return _combra_fid_from_features(ref_features, gen_features)
+        return _combra_frechet_from_features(ref_features, gen_features)
     if name == "cmmd":
         return _combra_cmmd_from_features(ref_features, gen_features)
-    return _combra_fd_dinov2_from_features(ref_features, gen_features)
+    return _combra_frechet_from_features(ref_features, gen_features)
 
 #----------------------------------------------------------------------------
 # Cross-rank gathering.
@@ -92,6 +98,13 @@ def _gather_feature_rows(local, device, rank, world_size):
     dist.gather(t, dst=0)
     return None
 
+def _combra_angle_workers(world_size):
+    # Per-rank CPU processes for the angle extraction, which was running
+    # single-threaded here and is the most expensive part of an eval at 512px.
+    # Divided by the rank count so an 8-GPU node does not oversubscribe itself.
+    return max(1, min(32, (os.cpu_count() or 1) // max(1, world_size)))
+
+
 def _gather_combra_gen_features(local_images, device, rank, world_size):
     """Each rank extracts the three image-feature sets from its own generated shard;
     rows are gathered to rank 0. ``{metric: [N, D]}`` on rank 0, ``{metric: None}``
@@ -108,7 +121,10 @@ def _gather_pooled_angles(local_images, device, rank, world_size):
     gathered to rank 0 (concatenated). Pooled angles from disjoint shards
     concatenate directly, so the rank-0 histogram matches a single-GPU
     ``images_to_pooled_angles`` over the full set."""
-    local = np.asarray(_combra_images_to_pooled_angles(local_images), np.float32).reshape(-1, 1)
+    local = np.asarray(
+        _combra_images_to_pooled_angles(local_images, workers=_combra_angle_workers(world_size)),
+        np.float32,
+    ).reshape(-1, 1)
     gathered = _gather_feature_rows(local, device, rank, world_size)
     return gathered.reshape(-1) if gathered is not None else None
 
@@ -215,8 +231,8 @@ def compute_combra_metrics(net, encoder, combra_ref, num_samples, batch, device,
     try:
         raw = _combra_distributed_metrics(combra_ref, gen_angles, gen_feats)
         for k, v in raw.items():
-            key = _COMBRA_IMAGE_RENAME.get(k, k)
-            metrics[f"combra_{key}"] = float(v)
+            metrics[f"combra_{k}"] = float(v)
+        metrics["combra_num_fid_samples"] = float(num_samples)
     except Exception as e:  # noqa: BLE001 -- never let metrics crash training
         log_fn(f"  combra metrics failed: {e}")
     return metrics

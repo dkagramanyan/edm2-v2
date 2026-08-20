@@ -3,6 +3,59 @@
 All notable changes to this fork (`edm2`) are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.1.0] — 2026-08-18
+
+Repairs the combra integration and makes a run's metric history machine-readable.
+
+### Fixed
+- **combra metrics were silently disabled.** `training/metrics.py` imported
+  `angle_density_metrics_from_pooled`, `fid_from_features` and
+  `fd_dinov2_from_features`, all removed in combra 0.5.0. The module-level
+  `except ImportError` set `HAS_COMBRA = False` and training then printed
+  *"combra is not installed; skipping"* — a false diagnosis that sent anyone
+  debugging it to reinstall a package that was already present. Now imports
+  `frechet_from_features` (one helper for both Fréchet metrics); combra >= 0.7.0
+  restores `angle_density_metrics_from_pooled`.
+- **The startup warning now tells the truth**, and an incompatible-but-present combra
+  is fatal: training refuses to start rather than burning a run that will log no
+  metrics. A genuinely absent combra still warns and continues.
+- **`[combra]` installed a combra with no metric backends.** The extra pulled bare
+  `combra`; since combra 0.5.0 the torch / `pytorch-fid` / `open-clip-torch` stack is
+  behind `combra[metrics]`, so FID / CMMD / FD-DINOv2 would have returned `nan` even
+  after the import fix. Now `combra[metrics] @ git+…`.
+- **`stats.jsonl` metric rows were unreadable.** The combra metrics were written to
+  their own row with unprefixed keys and a bare `kimg`, while `Progress/kimg` lived in
+  the status rows. `combra.metrics.load_fid_by_kimg` needs `Metrics/combra_fid` and
+  `Progress/kimg` on the *same* line, so it matched nothing and returned an empty dict
+  for every edm2 run — silently, since it shape-filters rather than raising. The
+  metrics row now carries both, plus `Progress/tick`, `wall_time` and `datetime`.
+- **Angle extraction ran single-threaded.** `images_to_pooled_angles` was called
+  without `workers`, leaving the most expensive part of an eval tick on one core.
+  It now uses `cpu_count // gpus` (capped at 32).
+- **The combra smoke test used random noise as its fixture.** Noise has no grain
+  contours, so the angle pipeline extracted no vertices and the check failed with
+  `attempt to get argmin of an empty sequence` — a message about nothing. The test now
+  builds synthetic grain images, and combra >= 0.7.0 names the empty-density case.
+
+### Changed
+- **Metric keys lost the literal `10k`.** `combra_fid10k` was emitted whatever
+  `--num-fid-samples` said, so any chart built from it was mislabelled. Keys are now
+  bare — `combra_fid`, `combra_cmmd`, `combra_fd_dinov2` — and the count is logged
+  once as `combra_num_fid_samples`.
+- **The status rows in `stats.jsonl` carry `wall_time` and `datetime`**, as the
+  logging contract requires.
+- `requires-python` raised to **3.12** to match combra.
+
+### Added
+- `Metrics/combra_fid_best`, the running best FID.
+- `tests/test_combra_contract.py` — asserts every combra symbol this repo imports
+  actually exists. CPU-only, no GPU/dataset/network, so it runs in every CI job.
+- `tests/test_smoke.py::test_combra_angle_metrics_run_offline` — the angle half needs
+  no backbone, so it is exercised even with no network.
+- `test_combra_import_guard` now asserts `HAS_COMBRA is True` whenever combra is
+  importable. It previously asserted only that the flag was a `bool`, which passed
+  either way — which is why the breakage above survived a whole combra release.
+
 ## [3.0.0] — 2026-07-17
 
 Conformance with the **v2 model-API convention** documented in `wc_cv`
