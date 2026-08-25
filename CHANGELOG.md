@@ -15,6 +15,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   needed; the fixes are described in this changelog instead.
 
 ### Fixed
+- **The rank-0-only combra smoke test hung every other rank when it failed.** It runs
+  under `if rank == 0` and deliberately raises, one line before
+  `precompute_combra_reference` — whose `all_reduce` the other ranks were already
+  blocked in. An unusable backend therefore surfaced as an NCCL watchdog timeout
+  rather than as the error it printed on rank 0. The failure is now agreed through
+  `all_ranks_ok` and every rank raises together.
+
+- **A pre-encoded latent zip fed 8-channel latents into the angle pipeline.**
+  `load_reference_shard` documents "raw RGB uint8 NHWC" but reads `dataset_obj[i]`
+  directly, so on the still-supported latent-zip config it handed combra latents
+  instead of pixels; the failure surfaced deep inside the preprocessing as an
+  unsupported channel count, and (per the item above) hung the run. The dataset's
+  channel count is now probed up front — from index 0, which every rank has, so all
+  ranks reach the same verdict — and anything other than 1 or 3 channels raises
+  naming the cause and the two ways out (point `--data` at the RGB dataset, which the
+  on-the-fly VAE encoder handles, or pass `--combra-metrics=False`).
+
 - **The shard-merge gate trusted a shard a dead rank never closed.** `merge_shards`
   read `missing_count` with a default of 0, so a shard whose process died before
   `close()` (attr absent) sailed through and fed zero-filled slots downstream. An

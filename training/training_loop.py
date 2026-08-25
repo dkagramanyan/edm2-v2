@@ -319,8 +319,21 @@ def training_loop(
         ref_count = combra_ref_count if combra_ref_count is not None else len(dataset_obj)
         dist.print0(f'Precomputing combra reference from {min(ref_count, len(dataset_obj))} raw images...')
         local_ref = combra_mod.load_reference_shard(dataset_obj, ref_count, batch_gpu, device, rank, world_size, seed=seed)
+        smoke_ok = True
         if rank == 0:
-            combra_mod.combra_smoke_test(local_ref, device, dist.print0)
+            try:
+                combra_mod.combra_smoke_test(local_ref, device, dist.print0)
+            except Exception as e:  # noqa: BLE001 -- re-raised on every rank below
+                smoke_ok = False
+                dist.print0(f'combra metrics smoke test failed: {e}')
+        # Agree before the next collective. The smoke test runs on rank 0 only, so letting
+        # it raise there stranded every other rank in the reference precompute's
+        # all_reduce -- the failure surfaced as an NCCL timeout rather than the backend
+        # error that caused it.
+        if not combra_mod.all_ranks_ok(smoke_ok, device, world_size):
+            raise RuntimeError(
+                'combra metrics smoke test failed on rank 0 (see its log above). '
+                'Refusing to burn a training run producing no metrics.')
         # (reference, ok): ok is rank-uniform, so gating on it is safe -- `combra_ref`
         # is None on every non-zero rank whether or not anything failed.
         combra_ref, combra_ok = combra_mod.precompute_combra_reference(

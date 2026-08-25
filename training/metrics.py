@@ -27,6 +27,7 @@ import torch
 try:
     from combra.metrics import self_test as _combra_self_test
     from combra.metrics.distributed import (
+        all_ranks_ok as _combra_all_ranks_ok,
         distributed_metrics as _combra_distributed_metrics_impl,
         gather_generated as _combra_gather_generated,
         precompute_reference as _combra_precompute_reference,
@@ -37,7 +38,7 @@ try:
 except ImportError as _combra_exc:
     _combra_self_test = _combra_precompute_reference = None
     _combra_gather_generated = _combra_gather_pooled_angles = None
-    _combra_distributed_metrics_impl = None
+    _combra_distributed_metrics_impl = _combra_all_ranks_ok = None
     HAS_COMBRA = False
     # Keep the reason. "combra is not installed" is the wrong diagnosis when combra
     # IS installed but has moved a symbol -- that misdirection is exactly how this
@@ -55,6 +56,9 @@ except ImportError as _combra_exc:
 # genuinely EDM2-specific: turning latents into uint8 RGB, and generating a shard.
 
 precompute_combra_reference = _combra_precompute_reference
+# Re-exported so training_loop.py can agree across ranks before a collective without
+# importing combra directly (it must keep working with combra absent).
+all_ranks_ok = _combra_all_ranks_ok
 
 #----------------------------------------------------------------------------
 
@@ -76,6 +80,18 @@ def load_reference_shard(dataset_obj, count, batch, device, rank, world_size, *,
     first-N slice is class-biased). The chosen indices are split round-robin across
     ranks (``pos % world_size == rank``)."""
     n = len(dataset_obj)
+    # Probed from the dataset, not from this rank's shard: index 0 exists on every rank
+    # (a shard can be empty when count < world_size), so every rank reaches the same
+    # verdict and they raise together rather than half of them hanging in the gather.
+    if n:
+        probe, _ = dataset_obj[0]
+        channels = int(np.asarray(probe).shape[0])  # CHW
+        if channels not in (1, 3):
+            raise RuntimeError(
+                f'combra metrics need pixel images, but this dataset yields {channels}-channel '
+                'data -- i.e. a pre-encoded latent zip, which the angle pipeline cannot read. '
+                'Point --data at the RGB dataset (StabilityVAEOnTheFlyEncoder encodes during '
+                'training) or pass --combra-metrics=False.')
     n_total = min(int(count), n)
     if n_total < n:
         idx = np.sort(np.random.RandomState(int(seed) & 0x7fffffff).choice(n, n_total, replace=False))
