@@ -15,7 +15,6 @@ Class-batch mode (``--classes`` + ``--samples-per-class``) writes per-rank
 
 import json
 import os
-import pickle
 import re
 import socket
 import warnings
@@ -34,20 +33,6 @@ from training.h5_writer import RankH5Writer, merge_shards
 warnings.filterwarnings('ignore', '`resume_download` is deprecated')
 warnings.filterwarnings('ignore', 'You are using `torch.load` with `weights_only=False`')
 warnings.filterwarnings('ignore', '1Torch was not compiled with flash attention')
-
-#----------------------------------------------------------------------------
-# Published NVIDIA reference checkpoints (external pickled modules). The WC-Co
-# workflow uses local .pt inference snapshots instead; these presets are kept for
-# reproducing the upstream ImageNet numbers.
-
-model_root = 'https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions'
-
-config_presets = {
-    'edm2-img512-s-fid':        dnnlib.EasyDict(net=f'{model_root}/edm2-img512-s-2147483-0.130.pkl'),   # fid = 2.56
-    'edm2-img512-m-fid':        dnnlib.EasyDict(net=f'{model_root}/edm2-img512-m-2147483-0.100.pkl'),   # fid = 2.25
-    'edm2-img512-xxl-fid':      dnnlib.EasyDict(net=f'{model_root}/edm2-img512-xxl-0939524-0.070.pkl'), # fid = 1.91
-    'edm2-img64-s-fid':         dnnlib.EasyDict(net=f'{model_root}/edm2-img64-s-1073741-0.075.pkl'),    # fid = 1.58
-}
 
 #----------------------------------------------------------------------------
 # Samplers live in training/samplers.py so training-time eval and generation share
@@ -90,21 +75,16 @@ def parse_int_list(s):
     return ranges
 
 #----------------------------------------------------------------------------
-# Network loading. Local `.pt` inference snapshots use the v2 state-dict format
-# (§3); external / legacy `.pkl` checkpoints keep the pickled-module loader.
+# Network loading. Only local `.pt` inference snapshots in the v2 state-dict format
+# (§3) are supported; legacy `.pkl` pickled-module checkpoints carry no class_names
+# and are rejected.
 
 def load_network(path, device, verbose=True):
-    if isinstance(path, str) and path.endswith('.pt'):
-        net, encoder, meta = ckpt.load_inference_snapshot(path, device, verbose=verbose)
-        return net, encoder, meta
-    with dnnlib.util.open_url(path, verbose=(verbose and dist.get_rank() == 0)) as f:
-        data = pickle.load(f)
-    net = data['ema'].to(device)
-    encoder = data.get('encoder', None)
-    if encoder is None:
-        encoder = dnnlib.util.construct_class_by_name(class_name='training.encoders.StandardRGBEncoder')
-    meta = dict(n_classes=int(net.label_dim), class_names=None)
-    return net, encoder, meta
+    if not (isinstance(path, str) and path.endswith('.pt')):
+        raise ValueError(f'Unsupported network checkpoint {path!r}: legacy .pkl pickled-module '
+                         'checkpoints are no longer loadable; pass a .pt inference snapshot '
+                         '(edm2-snapshot-*-inference.pt, §3)')
+    return ckpt.load_inference_snapshot(path, device, verbose=verbose)
 
 #----------------------------------------------------------------------------
 # Resolve a --classes spec (indices, ranges, and/or names) against the checkpoint's
@@ -164,8 +144,8 @@ def run_class_generation(net, encoder, gnet, *, classes, samples_per_class, base
         os.makedirs(os.path.join(outdir, 'shards'), exist_ok=True)
         writer = RankH5Writer(
             os.path.join(outdir, 'shards', f'rank_{rank:03d}.h5'), rank,
-            {c: len(v) for c, v in by_class.items()}, resolution, channels=int(probe.shape[1]),
-            class_names=class_names)
+            {c: len(v) for c, v in by_class.items()}, resolution, samples_per_class,
+            channels=int(probe.shape[1]), class_names=class_names)
     else:
         os.makedirs(outdir, exist_ok=True)
 
@@ -310,9 +290,8 @@ def _run(opts):
 # Command line interface.
 
 @click.command()
-@click.option('--net', '--network', 'net',  help='Network checkpoint (.pt inference snapshot or legacy .pkl)', metavar='PATH|URL', type=str, default=None)
-@click.option('--gnet',                     help='Guiding network', metavar='PATH|URL',                 type=str, default=None)
-@click.option('--preset',                   help='External reference preset', metavar='STR',            type=str, default=None)
+@click.option('--net', '--network', 'net',  help='Network checkpoint (.pt inference snapshot)', metavar='PATH', type=str, default=None)
+@click.option('--gnet',                     help='Guiding network', metavar='PATH',                     type=str, default=None)
 @click.option('--outdir',                   help='Where to save the output', metavar='DIR',             type=str, required=True)
 @click.option('--desc',                     help='Merged HDF5 basename (<desc>.h5)', metavar='STR',     type=str, default=None)
 @click.option('--classes',                  help='Classes to generate: indices/ranges or names (e.g. 0,1,4-6 or Ultra_Co11)', metavar='LIST', type=str, default=None)
@@ -336,7 +315,7 @@ def _run(opts):
 @click.option('--S_max', 'S_max',           help='Stoch. max noise level', metavar='FLOAT',             type=click.FloatRange(min=0), default='inf', show_default=True)
 @click.option('--S_noise', 'S_noise',       help='Stoch. noise inflation', metavar='FLOAT',             type=float, default=1, show_default=True)
 
-def cmdline(preset, **opts):
+def cmdline(**opts):
     """Generate images per class into the wc_cv angle-pipeline HDF5 layout.
 
     \b
@@ -346,14 +325,8 @@ def cmdline(preset, **opts):
         --gpus=2 --batch-gpu=32 --save-mode=hdf5
     """
     opts = dnnlib.EasyDict(opts)
-    if preset is not None:
-        if preset not in config_presets:
-            raise click.ClickException(f'Invalid configuration preset "{preset}"')
-        for key, value in config_presets[preset].items():
-            if opts.get(key, None) is None:
-                opts[key] = value
     if opts.net is None:
-        raise click.ClickException('Please specify either --preset or --net/--network')
+        raise click.ClickException('Please specify --net/--network')
     if opts.guidance in (None, 1):
         opts.guidance, opts.gnet = 1, None
     elif opts.gnet is None:

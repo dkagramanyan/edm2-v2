@@ -44,7 +44,7 @@ def _parse_csv(s):
 
 
 @click.command()
-@click.option('--net', '--network', 'net', help='Network checkpoint (.pt or legacy .pkl)', metavar='PATH|URL', type=str, required=True)
+@click.option('--net', '--network', 'net', help='Network checkpoint (.pt inference snapshot)', metavar='PATH', type=str, required=True)
 @click.option('--gnet',         help='Guiding network', metavar='PATH|URL',             type=str, default=None)
 @click.option('--data',         help='Real reference dataset (zip or dir)', metavar='ZIP|DIR', type=str, required=True)
 @click.option('--num-samples',  help='Samples (and real refs) per (sampler, k)', metavar='INT', type=click.IntRange(min=2), default=512, show_default=True)

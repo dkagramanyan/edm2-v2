@@ -77,7 +77,7 @@ def test_h5_writer_merge_roundtrip(tmp_path):
     # Two ranks, classes 0 and 2, 2 samples each per class per rank.
     for rank in range(2):
         w = RankH5Writer(str(shard_dir / f'rank_{rank:03d}.h5'), rank,
-                         {0: 2, 2: 2}, resolution=4, channels=3, class_names=names)
+                         {0: 2, 2: 2}, resolution=4, samples_per_class=4, channels=3, class_names=names)
         for c in (0, 2):
             imgs = np.full((2, 4, 4, 3), rank, dtype=np.uint8)
             w.write(c, imgs, seeds=[rank * 10 + 0, rank * 10 + 1], indices=[rank * 2, rank * 2 + 1])
@@ -88,27 +88,73 @@ def test_h5_writer_merge_roundtrip(tmp_path):
     assert counts == {0: 4, 2: 4}
 
     import h5py
+    # Parity attrs (image_shape_hwc / samples_per_class / class_idx) on the shards...
+    with h5py.File(shard_dir / 'rank_000.h5', 'r') as f:
+        assert tuple(f.attrs['image_shape_hwc']) == (4, 4, 3)
+        assert int(f.attrs['samples_per_class']) == 4
+        g = f['class_2']
+        assert int(g.attrs['class_idx']) == 2
+        assert int(g.attrs['samples_per_class']) == 4
+        assert tuple(g.attrs['image_shape_hwc']) == (4, 4, 3)
+    # ...and on the merged file.
     with h5py.File(out, 'r') as f:
         assert f.attrs['format'] == 'generated_images_shard'
         assert int(f.attrs['schema_version']) == 1
         assert int(f.attrs['missing_count']) == 0
         assert list(f.attrs['class_names']) == names
+        assert tuple(f.attrs['image_shape_hwc']) == (4, 4, 3)
+        assert int(f.attrs['samples_per_class']) == 4
         assert set(f.keys()) == {'class_0', 'class_2'}
         g = f['class_2']
         assert g['images'].shape == (4, 4, 4, 3)
         assert g['images'].dtype == np.uint8
         assert g.attrs['class_name'] == 'Ultra_Co6_2'
+        assert int(g.attrs['class_idx']) == 2
+        assert int(g.attrs['samples_per_class']) == 4
+        assert tuple(g.attrs['image_shape_hwc']) == (4, 4, 3)
         # Ordered by sample index across the two shards (rank0 idx 0,1 then rank1 idx 2,3).
         assert list(g['seeds'][:]) == [0, 1, 10, 11]
 
 
 def test_h5_merge_hard_fails_on_incomplete_shard(tmp_path):
     p = tmp_path / 'rank_000.h5'
-    w = RankH5Writer(str(p), 0, {0: 3}, resolution=4, channels=3, class_names=['A'])
+    w = RankH5Writer(str(p), 0, {0: 3}, resolution=4, samples_per_class=3, channels=3, class_names=['A'])
     w.write(0, np.zeros((2, 4, 4, 3), np.uint8), seeds=[0, 1], indices=[0, 1])  # leave 1 unwritten
     assert w.close() == 1  # missing_count
     with pytest.raises(ValueError, match='incomplete shard'):
         merge_shards([str(p)], str(tmp_path / 'out.h5'))
+
+
+def test_h5_merge_hard_fails_on_unclosed_shard(tmp_path):
+    # A rank that dies before close() leaves a shard with no missing_count attr at
+    # all; the merge gate must not read that as "0 missing".
+    import h5py
+    p = tmp_path / 'rank_000.h5'
+    with h5py.File(p, 'w') as f:
+        f.attrs['format'] = 'generated_images_shard'
+        f.attrs['schema_version'] = 1
+    with pytest.raises(ValueError, match='never closed'):
+        merge_shards([str(p)], str(tmp_path / 'out.h5'))
+
+
+def test_h5_merge_recomputes_missing_from_written_mask(tmp_path):
+    # The gate must not trust the missing_count attr alone: falsify it and leave a
+    # hole in the written mask.
+    p = tmp_path / 'rank_000.h5'
+    w = RankH5Writer(str(p), 0, {0: 3}, resolution=4, samples_per_class=3, channels=3, class_names=['A'])
+    w.write(0, np.zeros((2, 4, 4, 3), np.uint8), seeds=[0, 1], indices=[0, 1])  # leave 1 unwritten
+    assert w.close() == 1
+    import h5py
+    with h5py.File(p, 'r+') as f:
+        f.attrs['missing_count'] = 0
+        f['class_0'].attrs['missing_count'] = 0
+    with pytest.raises(ValueError, match='written mask'):
+        merge_shards([str(p)], str(tmp_path / 'out.h5'))
+
+
+def test_h5_writer_requires_class_names(tmp_path):
+    with pytest.raises(ValueError, match='class_names'):
+        RankH5Writer(str(tmp_path / 'rank_000.h5'), 0, {0: 1}, resolution=4, samples_per_class=1)
 
 
 # --- Checkpoint metadata contract (§3) --------------------------------------
@@ -130,6 +176,11 @@ def test_checkpoint_metadata_and_reload(tmp_path):
     assert isinstance(enc2, StandardRGBEncoder)
     out = net2(torch.randn(2, 3, 8, 8), torch.rand(2) + 0.1, torch.eye(3)[[0, 1]])
     assert out.shape == (2, 3, 8, 8)
+
+
+def test_load_network_rejects_legacy_pkl():
+    with pytest.raises(ValueError, match=r'\.pt inference snapshot'):
+        generate_images.load_network('edm2-img512-s.pkl', torch.device('cpu'))
 
 
 # --- Normalization contract (§5) --------------------------------------------

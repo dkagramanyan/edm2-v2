@@ -295,9 +295,10 @@ def cmdline():
     Examples:
 
     \b
-    # Generate 50000 images using 8 GPUs and save them as out/*/*.png
+    # Generate 50000 images using 8 GPUs and save them as out/*.png
     torchrun --standalone --nproc_per_node=8 generate_images.py \\
-        --preset=edm2-img512-xxl-guid-fid --outdir=out --subdirs --seeds=0-49999
+        --net=runs/00000-*/edm2-snapshot-002000-0.100-inference.pt \\
+        --outdir=out --seeds=0-49999
 
     \b
     # Calculate metrics for a random subset of 50000 images in out/
@@ -307,7 +308,7 @@ def cmdline():
     \b
     # Calculate metrics directly for a given model without saving any images
     torchrun --standalone --nproc_per_node=8 calculate_metrics.py gen \\
-        --net=https://nvlabs-fi-cdn.nvidia.com/edm2/posthoc-reconstructions/edm2-img512-s-2147483-0.130.pkl \\
+        --net=runs/00000-*/edm2-snapshot-002000-0.100-inference.pt \\
         --ref=https://nvlabs-fi-cdn.nvidia.com/edm2/dataset-refs/img512.pkl \\
         --seed=123456789
 
@@ -346,7 +347,7 @@ def calc(ref_path, metrics, **opts):
 # 'gen' subcommand.
 
 @cmdline.command()
-@click.option('--net',                      help='Network pickle filename', metavar='PATH|URL',             type=str, required=True)
+@click.option('--net',                      help='Network checkpoint (.pt inference snapshot)', metavar='PATH',  type=str, required=True)
 @click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True)
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',              type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--num', 'num_images',        help='Number of images to generate', metavar='INT',             type=click.IntRange(min=2), default=50000, show_default=True)

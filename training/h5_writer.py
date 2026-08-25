@@ -13,7 +13,9 @@ Each rank writes a shard ``shards/rank_NNN.h5`` with one group per class
 single ``<desc>.h5`` and **hard-fails** if any shard is incomplete, so a crashed
 generation run never feeds zero-filled (black) slots into the downstream angle
 pipeline. Every shard and merged file carries ``format="generated_images_shard"``
-and ``schema_version=1`` so downstream code sniffs any model's output identically.
+and ``schema_version=1`` plus the ``image_shape_hwc`` / ``samples_per_class`` /
+``class_idx`` parity attrs shared with the sibling repos, so downstream code sniffs
+any model's output identically.
 """
 
 import numpy as np
@@ -36,12 +38,18 @@ class RankH5Writer:
     """Preallocated per-class shard for one rank. ``class_to_count`` maps each class
     index to the number of samples this rank will write for it."""
 
-    def __init__(self, path, rank, class_to_count, resolution, channels=3, class_names=None):
+    def __init__(self, path, rank, class_to_count, resolution, samples_per_class, channels=3, class_names=None):
+        if class_names is None:
+            raise ValueError('class_names is required: every shard must carry the index -> class-name '
+                             'mapping so downstream code never guesses what it generated')
         h5py = _import_h5py()
+        shape_hwc = (int(resolution), int(resolution), int(channels))
         self.f = h5py.File(path, 'w')
         self.f.attrs['format'] = FORMAT
         self.f.attrs['schema_version'] = SCHEMA_VERSION
         self.f.attrs['rank'] = int(rank)
+        self.f.attrs['image_shape_hwc'] = shape_hwc
+        self.f.attrs['samples_per_class'] = int(samples_per_class)
         _set_class_names(self.f, class_names)
         self._pos = {}
         str_dt = h5py.string_dtype()
@@ -51,8 +59,10 @@ class RankH5Writer:
             g.create_dataset('seeds', shape=(n,), dtype='int64')
             g.create_dataset('indices', shape=(n,), dtype='int64')
             g.create_dataset('written', shape=(n,), dtype='bool', data=np.zeros(n, dtype=bool))
-            if class_names is not None:
-                g.attrs.create('class_name', class_names[c], dtype=str_dt)
+            g.attrs['class_idx'] = int(c)
+            g.attrs['samples_per_class'] = int(samples_per_class)
+            g.attrs['image_shape_hwc'] = shape_hwc
+            g.attrs.create('class_name', class_names[c], dtype=str_dt)
             self._pos[c] = 0
 
     def write(self, class_idx, images_nhwc, seeds, indices):
@@ -83,17 +93,28 @@ def merge_shards(shard_paths, out_path, class_names=None):
     merge hard-fail). Returns the merged per-class sample counts."""
     h5py = _import_h5py()
     per_class = {}
+    samples_per_class = None
+    image_shape_hwc = None
     for sp in shard_paths:
         with h5py.File(sp, 'r') as f:
             if f.attrs.get('format') != FORMAT:
                 raise ValueError(f'{sp}: not a {FORMAT} shard (format={f.attrs.get("format")!r})')
-            missing = int(f.attrs.get('missing_count', 0))
+            if 'missing_count' not in f.attrs:
+                raise ValueError(f'{sp}: no missing_count attr, so the shard was never closed (its '
+                                 'writing process died mid-run); refusing to merge')
+            missing = int(f.attrs['missing_count'])
             if missing != 0:
                 raise ValueError(f'{sp}: incomplete shard, missing_count={missing}; refusing to merge '
                                  '(a crashed generation run must not feed black images downstream)')
+            samples_per_class = int(f.attrs['samples_per_class'])
+            image_shape_hwc = tuple(int(x) for x in f.attrs['image_shape_hwc'])
             for name in f:
                 c = int(name.split('_')[1])
                 g = f[name]
+                unwritten = int((~g['written'][:]).sum())
+                if unwritten != 0:
+                    raise ValueError(f'{sp}/{name}: {unwritten} slot(s) missing from the written mask; '
+                                     'refusing to merge (the missing_count attr disagrees with the data)')
                 per_class.setdefault(c, []).append((g['indices'][:], g['seeds'][:], g['images'][:]))
 
     counts = {}
@@ -101,6 +122,8 @@ def merge_shards(shard_paths, out_path, class_names=None):
     with h5py.File(out_path, 'w') as out:
         out.attrs['format'] = FORMAT
         out.attrs['schema_version'] = SCHEMA_VERSION
+        out.attrs['image_shape_hwc'] = image_shape_hwc
+        out.attrs['samples_per_class'] = samples_per_class
         _set_class_names(out, class_names)
         for c in sorted(per_class):
             idxs = np.concatenate([blk[0] for blk in per_class[c]])
@@ -110,6 +133,9 @@ def merge_shards(shard_paths, out_path, class_names=None):
             g = out.create_group(f'class_{c}')
             g.create_dataset('images', data=imgs[order])
             g.create_dataset('seeds', data=seeds[order])
+            g.attrs['class_idx'] = int(c)
+            g.attrs['samples_per_class'] = samples_per_class
+            g.attrs['image_shape_hwc'] = image_shape_hwc
             g.attrs['missing_count'] = 0
             if class_names is not None:
                 g.attrs.create('class_name', class_names[c], dtype=str_dt)

@@ -6,10 +6,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Removed
+- **The legacy `.pkl` pickled-module network loader** (`generate_images.load_network`)
+  and the `edm2-gen-images --preset` list of upstream `.pkl` URLs that fed it. A `.pkl`
+  checkpoint carries no `class_names`, which the §4 HDF5 writer now requires, so the
+  path could only crash mid-run; a `.pkl` now fails immediately with a ValueError
+  pointing at `.pt` inference snapshots.
 - **`todo.md`.** Every item in it was closed, so the file said nothing a reader
   needed; the fixes are described in this changelog instead.
 
 ### Fixed
+- **The shard-merge gate trusted a shard a dead rank never closed.** `merge_shards`
+  read `missing_count` with a default of 0, so a shard whose process died before
+  `close()` (attr absent) sailed through and fed zero-filled slots downstream. An
+  absent attr is now an error ("never closed"), and the merge additionally recomputes
+  missing slots per class from the `written` masks, so the gate no longer depends on
+  the attr at all.
 - **`--max-images N` produced a single-class dataset.** `open_image_folder` /
   `open_image_zip` truncated a sorted (therefore class-grouped) file list, so a cap
   took every image from the alphabetically first class. The capped set trained a
@@ -47,6 +58,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   nothing checked. See below for this repo's share.
 
 ### Changed
+- **The §4 HDF5 artifacts carry the sibling repos' parity attrs.** Shard and merged
+  roots are stamped with `image_shape_hwc` and `samples_per_class`, and every
+  `class_<c>` group with `class_idx`, `samples_per_class` and `image_shape_hwc`
+  (same names as san's `gen_images.py`), so downstream readers sniff any model's
+  output identically. `RankH5Writer` also requires `class_names` now instead of
+  silently omitting the attr when given `None`.
 - **The sharded eval harness moved into combra** (`combra.metrics.distributed`). This
   repo kept only what is model-specific: producing a shard of generated images and the
   float->uint8 denormalisation. The four private copies had drifted three ways --
