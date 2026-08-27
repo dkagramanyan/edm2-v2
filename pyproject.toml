@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edm2"
-version = "3.2.0"
+version = "0.4.0"
 description = "EDM2: Analyzing and Improving the Training Dynamics of Diffusion Models (v2-convention refresh: unified CLI, EMA-only .pt snapshots, HDF5 class-batch generation, combra metrics)"
 readme = "README.md"
 requires-python = ">=3.12"
