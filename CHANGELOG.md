@@ -5,6 +5,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **`sh/train_{256,512,1024}.sh` and `sh/generate_{256,512,1024}.sh` rewritten to
+  the §9 launch-script shape shared by all four model repos.** Each script is
+  self-contained: SLURM-spool-safe repo-root discovery, `conda.sh` sourced before
+  `conda activate` (so it works from a non-interactive job shell), the offline-hub
+  contract, and one console-command call whose every knob is an env var with a
+  default (`DATA`, `OUTDIR`, `GPUS`, `BATCH_GPU`, `NETWORK`, `CLASSES`,
+  `SAMPLES_PER_CLASS`, `SEED`, …) plus `"$@"` passthrough for smoke runs. The
+  generation script no longer points at a non-existent `edm2-snapshot-latest`
+  file — `NETWORK` is required and names the real `<kimg>-<std>` snapshot pattern.
+  The dataset default is the shared `imagenet_9to4_1024x1024_<res>x<res>.zip` name.
+
 ## [0.4.0] — 2026-08-27
 
 Version numbering rejoins the shared `v0.x` tag lineage of the four model repos
