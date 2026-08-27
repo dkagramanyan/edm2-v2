@@ -5,6 +5,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-08-27
+
 ### Removed
 - **The legacy `.pkl` pickled-module network loader** (`generate_images.load_network`)
   and the `edm2-gen-images --preset` list of upstream `.pkl` URLs that fed it. A `.pkl`
