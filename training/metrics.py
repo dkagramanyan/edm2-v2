@@ -106,26 +106,40 @@ def load_reference_shard(dataset_obj, count, batch, device, rank, world_size, *,
         return np.concatenate(chunks, 0).astype(np.uint8)
     return np.zeros((0, 1, 1, 3), dtype=np.uint8)
 
+def _eval_draw(seed, idx, channels, resolution, label_dim):
+    """Noise and label index of eval sample ``idx`` (the §2 seed rule).
+
+    Both come from one CPU generator seeded by ``seed + idx`` alone, so the eval
+    set is identical at any ``--gpus`` and any subset reproduces in isolation.
+    """
+    g = torch.Generator("cpu").manual_seed(int(seed) + int(idx))
+    noise = torch.randn(channels, resolution, resolution, generator=g)
+    label = int(torch.randint(int(label_dim), (1,), generator=g)) if label_dim > 0 else None
+    return noise, label
+
+
 @torch.inference_mode()
 def generate_fake_shard(net, encoder, gnet, num_samples, batch, device, rank, world_size,
                         *, sampler, num_steps, guidance, seed):
     """Generate this rank's shard of fakes and return them as RGB uint8 NHWC.
 
-    ``num_samples`` is the global count; each rank produces its ``1/world_size``
-    slice with a distinct seed so the union is deterministic and non-overlapping."""
+    ``num_samples`` is the global count; rank ``r`` produces global samples
+    ``r, r + world_size, ...`` and every sample's draw is a function of ``seed``
+    and its global index, so the union is the same set at any world size."""
     from training.samplers import sample as sampler_sample
 
     encoder.init(device)
     n_local = (int(num_samples) + world_size - 1 - rank) // world_size  # ceil-split
-    g = torch.Generator(device=device).manual_seed(int(seed) + rank)
     C, R = net.img_channels, net.img_resolution
     chunks, got = [], 0
     while got < n_local:
         b = min(batch, n_local - got)
-        noise = torch.randn(b, C, R, R, device=device, generator=g)
+        draws = [_eval_draw(seed, rank + j * world_size, C, R, net.label_dim)
+                 for j in range(got, got + b)]
+        noise = torch.stack([d[0] for d in draws]).to(device)
         labels = None
         if net.label_dim > 0:
-            idx = torch.randint(net.label_dim, (b,), device=device, generator=g)
+            idx = torch.tensor([d[1] for d in draws], device=device)
             labels = torch.eye(net.label_dim, device=device)[idx]
         latents = sampler_sample(net, noise, labels=labels, gnet=gnet,
                                  sampler=sampler, num_steps=num_steps, guidance=guidance)

@@ -15,6 +15,30 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   needed; the fixes are described in this changelog instead.
 
 ### Fixed
+- **`Metrics/*` TensorBoard scalars were stamped at kimg instead of `cur_nimg`.**
+  The combra metrics block computed its own global step as `cur_nimg / 1e3` while
+  every other tag (losses, timing, `Fakes`) and the other three repos use
+  `cur_nimg`, so the metric curves sat on a different x-axis from everything else
+  (§7). `stats.jsonl` was always correct; only the tfevents view was off.
+
+- **Eval latents depended on the GPU count.** `generate_fake_shard` seeded one
+  generator per rank (`seed + rank`) over a per-rank block, so the same `--seed`
+  drew a different eval set at a different `--gpus`. Sample `i`'s noise and label
+  now come from a CPU generator seeded by `seed + i` alone
+  (`training.metrics._eval_draw`), so the set is identical at any world size and
+  any subset reproduces in isolation (§2). The per-tick `seed + cur_nimg` base is
+  unchanged.
+
+- **`tests/test_combra_contract.py` asserted combra symbols the training loop no
+  longer imports.** Its `REQUIRED` list still named the eight feature / angle
+  functions from before the sharded harness moved into combra, and never named
+  `combra.metrics.distributed`'s `all_ranks_ok` / `distributed_metrics` /
+  `gather_generated` / `precompute_reference` — the four symbols the loop actually
+  depends on. That is the exact blind spot the test exists to close (combra 0.5.0
+  removing three functions hid for a release the same way). It now pins
+  `(module, name)` pairs for every combra import in the repo and the unguarded
+  import block mirrors the loop's real imports.
+
 - **The rank-0-only combra smoke test hung every other rank when it failed.** It runs
   under `if rank == 0` and deliberately raises, one line before
   `precompute_combra_reference` — whose `all_reduce` the other ranks were already

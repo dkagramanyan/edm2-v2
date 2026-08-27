@@ -440,7 +440,7 @@ def training_loop(
                     sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance,
                     seed=seed + state.cur_nimg, log_fn=dist.print0)
                 if rank == 0 and stats_metrics:
-                    gstep, walltime = int(state.cur_nimg / 1e3), state.total_elapsed_time
+                    gstep, walltime = state.cur_nimg, state.total_elapsed_time  # global step = cur_nimg (§7)
                     if 'combra_fid' in stats_metrics:
                         best_fid = min(best_fid, float(stats_metrics['combra_fid']))
                         stats_metrics['combra_fid_best'] = best_fid
