@@ -213,7 +213,7 @@ distances — so the metrics are computed on all GPU ranks, matching DiffiT-v2.
 Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:
 
 - `combra_fid` (InceptionV3 FID), `combra_cmmd` (CLIP-MMD), `combra_fd_dinov2` (DINOv2 Fréchet), `combra_fid_best` (running best), `combra_num_fid_samples` (the count the run used)
-- angle-density metrics: `combra_w1`, `combra_w2`, `combra_circular_w1/w2`, `combra_mu1/mu2`, `combra_sigma1/sigma2`, `combra_amp1/amp2`
+- angle-density metrics: `combra_w1`, `combra_w2`, `combra_circular_w1/w2`, `combra_mu1/mu2`, `combra_sigma1/sigma2`, `combra_share1/share2`
 
 Every metric row in `stats.jsonl` carries `Progress/kimg` alongside the `Metrics/*`
 keys, so `combra.metrics.load_fid_by_kimg` reads a run's FID history directly. (The
