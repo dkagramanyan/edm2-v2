@@ -139,5 +139,5 @@ def test_combra_angle_metrics_run_offline():
     out = angle_density_metrics_from_pooled(
         images_to_pooled_angles(ref), images_to_pooled_angles(gen)
     )
-    for key in ("w1", "w2", "circular_w1", "circular_w2", "mu1", "sigma1", "share1"):
+    for key in ("w1", "w2", "circular_w1", "circular_w2", "mu1", "sigma1", "pi"):
         assert np.isfinite(out[key]), f"{key} is not finite"
