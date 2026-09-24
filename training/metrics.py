@@ -169,7 +169,7 @@ def compute_combra_metrics(net, encoder, combra_ref, num_samples, batch, device,
             metrics[f"combra_{k}"] = float(v)
         metrics["combra_num_fid_samples"] = float(num_samples)
     except Exception as e:  # noqa: BLE001 -- never let metrics crash training
-        log_fn(f"  combra metrics failed: {e}")
+        log_fn(f"combra metrics failed: {e}")
     return metrics
 
 #----------------------------------------------------------------------------

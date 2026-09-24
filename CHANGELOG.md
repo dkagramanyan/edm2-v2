@@ -6,6 +6,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- **Training logs follow the unified four-repo style (§7).** Every `.log` / console
+  line carries exactly one `[YYYY-MM-DD HH:MM:SS]` prefix, added only by
+  `dnnlib.util.Logger`; the run log is installed before anything is printed, so it
+  opens with the `Training options:` config dump (printed once; the parent now
+  prints it only for `--dry-run`) and a `[startup] torch … | cuda … | gpus … |
+  device …` header. The tick line uses the shared field widths; eval prints
+  `Evaluating combra metrics (N samples, G GPUs)...` and one `Metrics: k v` line at
+  `{v:.4f}`; snapshots print `Saved <file>` after the fakes png and each `.pt`; the
+  run ends with `Training complete.`
+  - `stats.jsonl`: one row per tick, written after that tick's eval, so the
+    `Metrics/*` and `Timing/eval_sec` of an eval tick sit in its own row (no separate
+    metrics row); `json.dumps` at full precision, non-finite values as `null`.
+  - TensorBoard: no `walltime=` (curves are no longer dated 1970), no `log` text tag,
+    `Timing/eval_sec` on eval ticks, hparams written at `step=cur_nimg` into the
+    run's own event file, and the writer is closed at the end.
+  - combra pin `v0.15.1` → `v0.15.3` (`write_hparams(..., step=)`).
 - **combra pin `v0.13.0` → `v0.15.1`.** The code and tests already expected the
   0.14.0 metric key `pi` (in place of `share1`/`share2`), but a fresh
   `pip install -e '.[combra]'` still resolved 0.13.0 and logged the old keys. 0.15.x

@@ -188,7 +188,7 @@ sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 runs/00000-edm2-img256-s-gpus2-batch128/
 ├── training_options.json                       # all hyperparameters
 ├── 00000-edm2-img256-s-gpus2-batch128.log      # rank-0 console transcript
-├── stats.jsonl                                 # machine-readable scalars + combra metrics (scalar rows only)
+├── stats.jsonl                                 # one row per tick: scalars (+ combra metrics on eval ticks)
 ├── events.out.tfevents.*.00000-…-batch128      # TensorBoard (run name as filename_suffix)
 ├── reals.png                                   # real image grid (raw dataset pixels, class-sorted)
 ├── fakes_init.png                              # pre-training samples
@@ -215,8 +215,10 @@ Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:
 - `combra_fid` (InceptionV3 FID), `combra_cmmd` (CLIP-MMD), `combra_fd_dinov2` (DINOv2 Fréchet), `combra_fid_best` (running best), `combra_num_fid_samples` (the count the run used)
 - angle-density metrics: `combra_w1`, `combra_w2`, `combra_circular_w1/w2`, `combra_mu1/mu2`, `combra_sigma1/sigma2`, `combra_pi`
 
-Every metric row in `stats.jsonl` carries `Progress/kimg` alongside the `Metrics/*`
-keys, so `combra.metrics.load_fid_by_kimg` reads a run's FID history directly. (The
+`stats.jsonl` holds one row per tick; on an eval tick the `Metrics/*` keys (and
+`Timing/eval_sec`) sit in that tick's row alongside `Progress/kimg`, so
+`combra.metrics.load_fid_by_kimg` reads a run's FID history directly. Values are
+full-precision JSON, with non-finite values written as `null`. (The
 keys used to carry a literal `10k` suffix that never tracked `--num-fid-samples`, and
 sat in a row without `Progress/kimg`; neither is true any more.)
 

@@ -73,8 +73,8 @@ class Logger(object):
     def _add_timestamps(self, text: str) -> str:
         """Prefix each written line with a local system timestamp.
 
-        Lines that already carry one (e.g. anything routed through
-        training.logger, which stamps in its own `_do_log`) are left alone.
+        This is the only place a timestamp is added; a line that already
+        carries one is left alone, so a nested Logger never doubles it.
         """
         ts = time.strftime('[%Y-%m-%d %H:%M:%S] ')
         segments = text.split('\n')

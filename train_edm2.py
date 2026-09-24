@@ -142,7 +142,7 @@ def setup_training_config(cfg='edm2-img512-s', gpus=1, **opts):
 
 def print_training_config(run_dir, c, num_gpus, precision):
     dist.print0()
-    dist.print0('Training config:')
+    dist.print0('Training options:')
     dist.print0(json.dumps(c, indent=2))
     dist.print0()
     dist.print0(f'Output directory:        {run_dir}')
@@ -175,17 +175,19 @@ def make_run_dir(outdir, desc):
 # Launch training.
 
 def launch_training(run_dir, c):
-    if dist.get_rank() == 0 and not os.path.isdir(run_dir):
-        dist.print0('Creating output directory...')
-        os.makedirs(run_dir)
-        with open(os.path.join(run_dir, 'training_options.json'), 'wt') as f:
-            json.dump(c, f, indent=2)
-
-    torch.distributed.barrier()
-    # Rank-0-only run log, named after the run directory (§7).
+    # Rank-0-only run log, named after the run directory (§7), installed before
+    # anything is printed so the config dump and startup header land in it.
     if dist.get_rank() == 0:
+        if not os.path.isdir(run_dir):
+            os.makedirs(run_dir)
+            with open(os.path.join(run_dir, 'training_options.json'), 'wt') as f:
+                json.dump(c, f, indent=2)
         run_name = os.path.basename(os.path.normpath(run_dir))
         dnnlib.util.Logger(file_name=os.path.join(run_dir, f'{run_name}.log'), file_mode='a', should_flush=True)
+        print_training_config(run_dir=run_dir, c=c, num_gpus=dist.get_world_size(),
+                              precision=c.network_kwargs.mixed_precision_dtype)
+
+    torch.distributed.barrier()
     training.training_loop.training_loop(run_dir=run_dir, **c)
 
 #----------------------------------------------------------------------------
@@ -293,15 +295,14 @@ def launch_from_opts(opts):
     cfg = opts['cfg']
     precision = opts.get('precision', 'fp16')
 
-    print('Setting up training config...')
     c = setup_training_config(gpus=gpus, **opts)
 
     # Resolve the run directory here, in the parent, so every spawned rank is handed
     # the same path instead of racing to number one for itself.
     run_desc = make_run_desc(cfg, gpus, c.batch_size, desc)
     run_dir = make_run_dir(outdir, run_desc)
-    print_training_config(run_dir=run_dir, c=c, num_gpus=gpus, precision=precision)
     if dry_run:
+        print_training_config(run_dir=run_dir, c=c, num_gpus=gpus, precision=precision)
         print('Dry run; exiting.')
         return
 

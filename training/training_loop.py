@@ -144,7 +144,15 @@ def _generate_grid(eval_net, encoder, gnet, device, *, sampler, num_steps, guida
 #----------------------------------------------------------------------------
 # Main training loop.
 
-def _write_run_hparams(run_dir, writer, metrics):
+def _startup_header(num_gpus):
+    parts = [f'torch {torch.__version__}', f'cuda {torch.version.cuda}', f'gpus {num_gpus}']
+    parts.append('device ' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'))
+    for v in ('CUDA_VISIBLE_DEVICES', 'TORCH_CUDA_ARCH_LIST', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE'):
+        if os.environ.get(v):
+            parts.append(f'{v}={os.environ[v]}')
+    return ' | '.join(parts)
+
+def _write_run_hparams(run_dir, writer, metrics, step):
     """Record this run's configuration in TensorBoard's HPARAMS tab (§7).
 
     The config is read back from ``training_options.json``, already written by the
@@ -165,26 +173,29 @@ def _write_run_hparams(run_dir, writer, metrics):
         return
     with open(path) as fh:
         config = json.load(fh)
-    write_hparams(writer, config, metrics)
+    write_hparams(writer, config, metrics, step=step)
 
 
-def build_metrics_row(stats_metrics, cur_nimg, cur_tick, timestamp, elapsed, eval_sec=None):
-    """The combra metrics row for ``stats.jsonl``.
+def build_stats_row(scalars, cur_nimg, cur_tick, timestamp, elapsed):
+    """One tick's row for ``stats.jsonl``: the tick scalars plus progress/time columns.
 
-    Carries the ``Metrics/*`` values AND ``Progress/kimg`` on the same line, because
-    ``combra.metrics.load_fid_by_kimg`` matches a record only when both are present
-    and both are plain JSON scalars. Kept as a function so a test can exercise the
-    real row without running a training loop.
+    The eval block adds that tick's ``Metrics/*`` (and ``Timing/eval_sec``) to the
+    same dict, so ``Metrics/*`` and ``Progress/kimg`` share a line, which is what
+    ``combra.metrics.load_fid_by_kimg`` matches on. Kept as a function so a test can
+    exercise the real row without running a training loop.
     """
-    row = {f'Metrics/{name}': float(value) for name, value in stats_metrics.items()}
-    if eval_sec is not None:
-        row['Timing/eval_sec'] = eval_sec
+    row = {name: float(value) for name, value in scalars.items()}
     row['Progress/kimg'] = cur_nimg / 1e3
     row['Progress/tick'] = cur_tick
     row['timestamp'] = timestamp
     row['wall_time'] = elapsed
     row['datetime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     return row
+
+def stats_line(row):
+    """Serialize a stats row at full precision, non-finite values as ``null`` (§7)."""
+    row = {k: (None if isinstance(v, float) and not np.isfinite(v) else v) for k, v in row.items()}
+    return json.dumps(row, allow_nan=False)
 
 #----------------------------------------------------------------------------
 
@@ -223,6 +234,8 @@ def training_loop(
     eval_guidance       = 1,        # Classifier-free guidance strength for eval-time generation.
 ):
     # Initialize.
+    if dist.get_rank() == 0:
+        print('[startup] ' + _startup_header(dist.get_world_size()), flush=True)
     prev_status_time = time.time()
     misc.set_random_seed(seed, dist.get_rank())
     torch.backends.cudnn.benchmark = cudnn_benchmark
@@ -296,7 +309,6 @@ def training_loop(
         try:
             from torch.utils.tensorboard import SummaryWriter
             sw = SummaryWriter(run_dir, filename_suffix=f'.{run_name}')
-            tblog.register_tb_writer(sw)
         except ImportError:
             dist.print0('TensorBoard not available; skipping tfevents.')
 
@@ -367,6 +379,7 @@ def training_loop(
     start_nimg = state.cur_nimg
     cur_tick = 0
     stats_metrics = None            # latest combra metrics dict (rank 0)
+    stats_row = None                # this tick's stats.jsonl row, written after its eval (rank 0)
     best_fid = float('inf')         # running best combra FID -> Metrics/combra_fid_best
     while True:
         done = (state.cur_nimg >= stop_at_nimg)
@@ -388,14 +401,14 @@ def training_loop(
                 reserved    = training_stats.report0('Resources/peak_gpu_mem_reserved_gb',  torch.cuda.max_memory_reserved(device) / 2**30),
             )
             cur_tick += 1
-            # Console tick line (also teed into <run>.log, mirrored to TB text).
+            # Console tick line (also teed into <run>.log).
             tblog.log(' '.join([
                 f"tick {cur_tick:<5d}",
                 f"kimg {fields['kimg']:<9.1f}",
                 f"time {dnnlib.util.format_time(fields['time']):<12s}",
-                f"sec/tick {fields['sec_per_tick']:<8.2f}",
-                f"sec/kimg {fields['sec_per_kimg']:<7.3f}",
-                f"maintenance {fields['maintenance']:<7.2f}",
+                f"sec/tick {fields['sec_per_tick']:<8.1f}",
+                f"sec/kimg {fields['sec_per_kimg']:<8.2f}",
+                f"maintenance {fields['maintenance']:<6.1f}",
                 f"cpumem {fields['cpumem']:<6.2f}",
                 f"gpumem {fields['gpumem']:<6.2f}",
                 f"reserved {fields['reserved']:<6.2f}",
@@ -405,23 +418,17 @@ def training_loop(
             prev_status_time = cur_time
             torch.cuda.reset_peak_memory_stats()
 
-            # Flush training scalars to stats.jsonl (scalar rows only) and TensorBoard.
+            # Collect training scalars into this tick's stats.jsonl row (written after the
+            # eval block below, so an eval tick's metrics land in the same row) and log
+            # them to TensorBoard.
             training_stats.default_collector.update()
             if rank == 0:
-                fmt = {'Progress/tick': '%.0f', 'Progress/kimg': '%.3f', 'timestamp': '%.3f'}
-                collected = [(name, value.mean) for name, value in training_stats.default_collector.as_dict().items()]
-                now = time.time()
-                items = collected + [('Progress/tick', cur_tick), ('timestamp', now),
-                                     ('wall_time', state.total_elapsed_time)]
-                items = [f'"{name}": ' + (fmt.get(name, '%g') % value if np.isfinite(value) else 'NaN') for name, value in items]
-                items.append('"datetime": "%s"' % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                stats_jsonl.write('{' + ', '.join(items) + '}\n')
-                stats_jsonl.flush()
+                collected = {name: value.mean for name, value in training_stats.default_collector.as_dict().items()}
+                stats_row = build_stats_row(collected, state.cur_nimg, cur_tick, time.time(), state.total_elapsed_time)
                 if sw is not None:
-                    for name, value in collected:
-                        if np.isfinite(value):
-                            sw.add_scalar(name, float(value), global_step=state.cur_nimg, walltime=state.total_elapsed_time)
-                    sw.add_scalar('Progress/tick', float(cur_tick), global_step=state.cur_nimg, walltime=state.total_elapsed_time)
+                    for name, value in stats_row.items():
+                        if name not in ('timestamp', 'wall_time', 'datetime') and np.isfinite(value):
+                            sw.add_scalar(name, float(value), global_step=state.cur_nimg)
                     sw.flush()
 
         # Evaluate combra metrics (all ranks generate their shard; rank 0 aggregates)
@@ -434,46 +441,48 @@ def training_loop(
             eval_net = _primary_ema_net(ema, net)
             eval_net.eval()
             if use_combra:
+                dist.print0(f'Evaluating combra metrics ({num_fid_samples} samples, {world_size} GPUs)...')
                 eval_start = time.time()
                 stats_metrics = combra_mod.compute_combra_metrics(
                     eval_net, encoder, combra_ref, num_fid_samples, batch_gpu, device, rank, world_size,
                     sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance,
                     seed=seed + state.cur_nimg, log_fn=dist.print0)
                 if rank == 0 and stats_metrics:
-                    gstep, walltime = state.cur_nimg, state.total_elapsed_time  # global step = cur_nimg (§7)
+                    eval_sec = time.time() - eval_start
                     if 'combra_fid' in stats_metrics:
                         best_fid = min(best_fid, float(stats_metrics['combra_fid']))
                         stats_metrics['combra_fid_best'] = best_fid
-                    # The metrics row carries the Metrics/ prefix AND its own
-                    # Progress/kimg. combra.metrics.load_fid_by_kimg needs both on the
-                    # same JSON line; the old row had neither (bare combra_fid10k, bare
-                    # kimg), so the reader matched nothing and returned {} for every
-                    # edm2 run -- silently, since it shape-filters rather than raising.
-                    # It is written here, not folded into the next status row: the
-                    # status block runs BEFORE this one, so folding would stamp these
-                    # metrics with the following tick's kimg.
-                    now = time.time()
-                    row = build_metrics_row(stats_metrics, state.cur_nimg, cur_tick,
-                                            now, state.total_elapsed_time,
-                                            eval_sec=time.time() - eval_start)
-                    stats_jsonl.write(json.dumps(row) + '\n')
-                    stats_jsonl.flush()
-                    if sw is not None:
+                    # Folded into this tick's row: Metrics/* and Progress/kimg must share
+                    # a line for combra.metrics.load_fid_by_kimg (§7).
+                    if stats_row is None:
+                        stats_row = build_stats_row({}, state.cur_nimg, cur_tick, time.time(), state.total_elapsed_time)
+                    stats_row.update({f'Metrics/{name}': float(value) for name, value in stats_metrics.items()})
+                    stats_row['Timing/eval_sec'] = eval_sec
+                    if sw is not None:  # global step = cur_nimg (§7)
                         for name, value in stats_metrics.items():
                             if np.isfinite(value):
-                                sw.add_scalar(f'Metrics/{name}', value, global_step=gstep, walltime=walltime)
+                                sw.add_scalar(f'Metrics/{name}', value, global_step=state.cur_nimg)
+                        sw.add_scalar('Timing/eval_sec', eval_sec, global_step=state.cur_nimg)
                         sw.flush()
-                    tblog.log('Metrics: ' + '  '.join(f'{k} {v:g}' for k, v in stats_metrics.items()))
+                    tblog.log('Metrics: ' + '  '.join(f'{k} {v:.4f}' for k, v in stats_metrics.items()))
             if rank == 0:
                 grid_n = min(64, batch_gpu * num_accumulation_rounds)
                 grid_size = _grid_size(grid_n)
                 fakes = _generate_grid(eval_net, encoder, None, device, sampler=eval_sampler,
                                        num_steps=eval_num_steps, guidance=eval_guidance, seed=seed, n=grid_n)
-                fakes_canvas = save_image_grid(fakes, os.path.join(run_dir, f'fakes{state.cur_nimg // 1000:06d}.png'), grid_size)
+                fakes_fname = f'fakes{state.cur_nimg // 1000:06d}.png'
+                fakes_canvas = save_image_grid(fakes, os.path.join(run_dir, fakes_fname), grid_size)
+                dist.print0(f'Saved {fakes_fname}')
                 if sw is not None:
                     sw.add_image('Fakes', fakes_canvas, global_step=state.cur_nimg, dataformats='HWC')
                     sw.flush()
                 net.train()
+
+        # One stats.jsonl row per tick, after that tick's eval (§7).
+        if stats_row is not None:
+            stats_jsonl.write(stats_line(stats_row) + '\n')
+            stats_jsonl.flush()
+            stats_row = None
 
         # Save checkpoints: EMA-only .pt state-dict inference snapshots, one per EMA
         # std, written atomically and pruned to --snapshot-keep-last (§3). The newest
@@ -484,12 +493,11 @@ def training_loop(
             ema_list = ema.get() if ema is not None else [(net, '')]
             for ema_net, ema_suffix in ema_list:
                 fname = f'edm2-snapshot-{state.cur_nimg//1000:06d}{ema_suffix}-inference.pt'
-                dist.print0(f'Saving {fname} ... ', end='', flush=True)
                 ckpt.save_inference_snapshot(
                     os.path.join(run_dir, fname),
                     ema_net=ema_net, network_kwargs=full_network_kwargs, encoder_kwargs=encoder_kwargs,
                     class_names=class_names, cur_nimg=state.cur_nimg, resolution=pixel_resolution)
-                dist.print0('done')
+                dist.print0(f'Saved {fname}')
             prune_inference_snapshots(run_dir, snapshot_keep_last)
 
         # Done?
@@ -532,8 +540,10 @@ def training_loop(
         cumulative_training_time += time.time() - batch_start_time
 
     if rank == 0 and sw is not None:
-        _write_run_hparams(run_dir, sw, {'Metrics/combra_fid_best': float(best_fid)})
+        _write_run_hparams(run_dir, sw, {'Metrics/combra_fid_best': float(best_fid)}, step=state.cur_nimg)
+        sw.close()
     if stats_jsonl is not None:
         stats_jsonl.close()
+    dist.print0('Training complete.')
 
 #----------------------------------------------------------------------------
