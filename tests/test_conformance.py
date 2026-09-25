@@ -306,3 +306,59 @@ def test_resolve_classes_by_index_range_and_name():
         generate_images.resolve_classes('9', 3, names)
     with pytest.raises(click.ClickException):
         generate_images.resolve_classes('Nope', 3, names)
+
+
+def _shard(path, rank, indices, samples_per_class, c=0):
+    w = RankH5Writer(str(path), rank, {c: len(indices)}, resolution=4, samples_per_class=samples_per_class,
+                     channels=3, class_names=['A'])
+    w.write(c, np.zeros((len(indices), 4, 4, 3), np.uint8), seeds=list(indices), indices=list(indices))
+    assert w.close() == 0
+    return str(path)
+
+
+def test_h5_merge_hard_fails_on_duplicate_indices(tmp_path):
+    # A stale shard from an earlier run repeats sample indices of the current one.
+    a = _shard(tmp_path / 'rank_000.h5', 0, [0, 1], samples_per_class=2)
+    b = _shard(tmp_path / 'rank_001.h5', 1, [0, 1], samples_per_class=2)
+    with pytest.raises(ValueError, match='duplicate sample indices'):
+        merge_shards([a, b], str(tmp_path / 'out.h5'))
+    assert not (tmp_path / 'out.h5').exists()
+
+
+def test_h5_merge_hard_fails_on_wrong_class_count(tmp_path):
+    a = _shard(tmp_path / 'rank_000.h5', 0, [0, 2], samples_per_class=4)
+    with pytest.raises(ValueError, match='expected samples_per_class=4'):
+        merge_shards([a], str(tmp_path / 'out.h5'))
+
+
+class _LabelledSet:
+    # Minimal dataset: 360 images per class, stored class-sorted as in the wc zips.
+    def __init__(self, per_class=360, label_dim=3):
+        self.label_dim, self.has_labels = label_dim, label_dim > 0
+        self._c = np.repeat(np.arange(max(label_dim, 1)), per_class)  # per_class: int or per-class list
+
+    def __len__(self):
+        return len(self._c)
+
+    def get_label(self, i):
+        return np.eye(self.label_dim, dtype=np.float32)[self._c[i]] if self.label_dim else np.zeros([0], np.float32)
+
+    def __getitem__(self, i):
+        return np.full((1, 2, 2), self._c[i], dtype=np.uint8), self.get_label(i)
+
+
+@pytest.mark.parametrize('n', [64, 49, 16, 3, 1])
+def test_reals_grid_is_class_balanced_like_the_fakes(n):
+    from training.training_loop import _class_sorted_onehot, _pick_reals_sorted
+    reals = _pick_reals_sorted(_LabelledSet(), n, torch.device('cpu'))
+    real_classes = reals[:, 0, 0, 0].tolist()
+    fake_classes = _class_sorted_onehot(3, n, torch.device('cpu')).argmax(1).tolist()
+    assert real_classes == fake_classes
+
+
+def test_reals_grid_tops_up_a_short_class_and_handles_unlabelled():
+    from training.training_loop import _pick_reals_sorted
+    reals = _pick_reals_sorted(_LabelledSet(per_class=[2, 10, 10]), 9, torch.device('cpu'))
+    assert reals[:, 0, 0, 0].tolist() == [0, 0, 1, 1, 1, 1, 2, 2, 2]
+    reals = _pick_reals_sorted(_LabelledSet(per_class=10, label_dim=0), 4, torch.device('cpu'))
+    assert reals.shape[0] == 4

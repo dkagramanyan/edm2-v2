@@ -90,7 +90,8 @@ class RankH5Writer:
 def merge_shards(shard_paths, out_path, class_names=None):
     """Merge per-rank shards into ``out_path``, ordered by sample index within each
     class. Raises if any shard is not a complete ``generated_images_shard`` (the §4
-    merge hard-fail). Returns the merged per-class sample counts."""
+    merge hard-fail), or if a class has duplicate sample indices or a count other
+    than ``samples_per_class``. Returns the merged per-class sample counts."""
     h5py = _import_h5py()
     per_class = {}
     samples_per_class = None
@@ -116,6 +117,16 @@ def merge_shards(shard_paths, out_path, class_names=None):
                     raise ValueError(f'{sp}/{name}: {unwritten} slot(s) missing from the written mask; '
                                      'refusing to merge (the missing_count attr disagrees with the data)')
                 per_class.setdefault(c, []).append((g['indices'][:], g['seeds'][:], g['images'][:]))
+
+    # Checked before the output is opened, so a bad merge leaves no half-written file.
+    for c, blocks in per_class.items():
+        idxs = np.concatenate([blk[0] for blk in blocks])
+        if len(np.unique(idxs)) != len(idxs):
+            raise ValueError(f'class_{c}: duplicate sample indices across shards; refusing to merge '
+                             '(stale shards from an earlier run in the same outdir?)')
+        if len(idxs) != samples_per_class:
+            raise ValueError(f'class_{c}: {len(idxs)} samples across shards, expected samples_per_class='
+                             f'{samples_per_class}; refusing to merge')
 
     counts = {}
     str_dt = h5py.string_dtype()

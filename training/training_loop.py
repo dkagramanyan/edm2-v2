@@ -155,6 +155,9 @@ def _class_sorted_onehot(label_dim, n, device):
 
 def _pick_reals_sorted(dataset_obj, n, device):
     # Raw dataset pixels (never VAE round-tripped), class-sorted for the grid rows.
+    # Slot k shows class k*label_dim//n, the split _class_sorted_onehot uses for the
+    # fakes, so both grids line up class by class; a class with too few images is
+    # topped up from the remaining ones.
     cap = min(len(dataset_obj), 4096)
     tagged = []
     for i in range(cap):
@@ -162,7 +165,16 @@ def _pick_reals_sorted(dataset_obj, n, device):
         c = int(np.argmax(lbl)) if getattr(lbl, 'size', 0) > 0 else 0
         tagged.append((c, i))
     tagged.sort()
-    sel = [i for _c, i in tagged[:n]]
+    label_dim = max(dataset_obj.label_dim if dataset_obj.has_labels else 0, 1)
+    quota = np.bincount(np.minimum(np.arange(n) * label_dim // max(n, 1), label_dim - 1), minlength=label_dim)
+    sel, rest = [], []
+    for c, i in tagged:
+        if c < label_dim and quota[c] > 0:
+            quota[c] -= 1
+            sel.append((c, i))
+        else:
+            rest.append((c, i))
+    sel = [i for _c, i in sorted(sel + rest[:n - len(sel)])]
     return torch.stack([torch.as_tensor(dataset_obj[i][0]) for i in sel]).to(device)
 
 @torch.inference_mode()

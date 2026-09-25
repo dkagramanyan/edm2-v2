@@ -5,6 +5,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **combra pin `v0.19.0` → `v0.19.1`** (nan angle keys for an empty reference,
+  `angle_workers` per CPU allocation).
+
+### Fixed
+- **`reals.png` / TensorBoard `Reals` showed only class 0.** `_pick_reals_sorted`
+  sorted the dataset by (class, index) and took the first n, so a grid of ≤ 64 images
+  from a 360-per-class zip was all Ultra_Co25 (16 px zip: [64, 0, 0] against
+  [22, 21, 21] for the fakes). Slot k now shows class `k*label_dim//n`, the split
+  `_class_sorted_onehot` uses for the fakes, so both grids line up class by class; a
+  class with too few images is topped up from the others.
+- **Generation merged stale shards.** The merge globbed every `shards/rank_*.h5`, so a
+  `--gpus 4` run followed by a `--gpus 2` run into the same outdir mixed in the old
+  model's `rank_002/003` and gave classes more than `samples_per_class` images. The
+  merge now reads only `rank_{r:03d}.h5` for `r < world_size`, rank 0 deletes shards
+  with `r >= world_size` before writing, and `merge_shards` raises (before opening the
+  output) on duplicate sample indices or a per-class count other than
+  `samples_per_class`.
+
 ## [0.7.2] — 2026-09-25
 
 ### Added

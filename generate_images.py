@@ -142,6 +142,13 @@ def run_class_generation(net, encoder, gnet, *, classes, samples_per_class, base
             labels=probe_labels, gnet=gnet, sampler=sampler, **sampler_kwargs))
         resolution = int(probe.shape[-1])
         os.makedirs(os.path.join(outdir, 'shards'), exist_ok=True)
+        if rank == 0:
+            # A previous run with more GPUs into the same outdir leaves rank_NNN.h5
+            # shards no rank of this run overwrites; drop them so they cannot be merged.
+            for p in os.listdir(os.path.join(outdir, 'shards')):
+                m = re.fullmatch(r'rank_(\d+)\.h5', p)
+                if m and int(m.group(1)) >= world_size:
+                    os.remove(os.path.join(outdir, 'shards', p))
         writer = RankH5Writer(
             os.path.join(outdir, 'shards', f'rank_{rank:03d}.h5'), rank,
             {c: len(v) for c, v in by_class.items()}, resolution, samples_per_class,
@@ -176,9 +183,7 @@ def run_class_generation(net, encoder, gnet, *, classes, samples_per_class, base
 
     torch.distributed.barrier()
     if rank == 0 and save_mode == 'hdf5':
-        shard_paths = sorted(
-            os.path.join(outdir, 'shards', p) for p in os.listdir(os.path.join(outdir, 'shards'))
-            if re.fullmatch(r'rank_\d+\.h5', p))
+        shard_paths = [os.path.join(outdir, 'shards', f'rank_{r:03d}.h5') for r in range(world_size)]
         out_path = os.path.join(outdir, f'{desc}.h5')
         counts = merge_shards(shard_paths, out_path, class_names=class_names)
         if verbose:
