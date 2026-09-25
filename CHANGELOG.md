@@ -5,6 +5,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-09-25
+
 ### Changed
 - **combra pin `v0.19.0` → `v0.19.1`** (nan angle keys for an empty reference,
   `angle_workers` per CPU allocation).
