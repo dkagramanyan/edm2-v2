@@ -199,12 +199,23 @@ puts them, and the peak at α_ref. α_ref itself is left at the paper's value: n
 the paper nor upstream gives a rule for rescaling it with the batch size.
 
 Ready-made launch scripts live in `sh/` — self-locating and offline-cluster ready
-(`HF_HUB_OFFLINE=1`); SLURM specifics are supplied at submission time:
+(`HF_HUB_OFFLINE=1`); SLURM specifics are supplied at submission time. Every setting of a
+run sits in the block at the top of the train script: edit the block, or override one
+value for a single launch with an env var (`KIMG=200 SNAP=2 bash sh/train_256.sh`).
 
 ```bash
-bash sh/train_256.sh                                   # workstation
+bash sh/train_256.sh                                   # workstation: detaches, prints the log path
+FOREGROUND=1 bash sh/train_256.sh                      # workstation, stays attached
 sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 ```
+
+On a workstation the train script re-launches itself in its own session and returns at
+once, so the run survives closing the terminal. Everything it prints goes to
+`logs/edm2-train_256-<date>-<time>.log`, with a `.pid` file beside it: follow the run with
+`tail -f <log>`, stop it (every rank) with `kill -- -<pid>`. `FOREGROUND=1` and SLURM jobs
+stay attached and copy the output to the same log. The log opens with a `Run settings:`
+block — every setting, the git commit, host, date, `CUDA_VISIBLE_DEVICES` and the full
+command.
 
 ### Augmentation
 
