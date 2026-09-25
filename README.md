@@ -142,7 +142,7 @@ edm2-prepare-data convert --source=/data/wc_co --dest=datasets/wc_co_512x512.zip
 ```
 
 The WC-Co zips used by the `sh/` scripts are
-`imagenet_9to4_orig_<r>x<r>.zip` (r = 256 / 512 / 1024): the **1080 original crops**,
+`imagenet_9to4_1024x1024_<r>x<r>.zip` (r = 256 / 512 / 1024): the **1080 original crops**,
 360 per class, `class_names` `['Ultra_Co25', 'Ultra_Co11', 'Ultra_Co6_2']`. They
 replace the `imagenet_9to4_1024x1024_<r>x<r>.zip` zips, which stored each crop in all
 8 dihedral orientations (8640 images); the orientations are now drawn on the fly
@@ -213,7 +213,7 @@ image (`precompute_reference(..., dihedral=True)`, combra ≥ 0.19.0), so it mat
 distribution training sees. `--augment False` trains on the images as stored and uses
 the plain reference.
 
-An epoch is one pass over the dataset: **1080 images** with the `orig` zips (it was
+An epoch is one pass over the dataset: **1080 images** with the current zips (it was
 8640 with the old 8-orientation zips). kimg counts training images seen, so `--kimg`,
 `--tick` and the eval / snapshot cadence mean the same amount of training as before;
 1 kimg is now ~0.93 epochs instead of ~0.12.

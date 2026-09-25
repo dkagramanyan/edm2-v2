@@ -53,7 +53,7 @@ export PYTHONUNBUFFERED=1
 edm2-train \
     --outdir "${OUTDIR:-./runs}" \
     --cfg "${CFG:-edm2-img1024-s}" \
-    --data "${DATA:-./datasets/imagenet_9to4_orig_1024x1024.zip}" \
+    --data "${DATA:-./datasets/imagenet_9to4_1024x1024_1024x1024.zip}" \
     --gpus "${GPUS:-2}" \
     --batch-gpu "${BATCH_GPU:-16}" \
     --cond True \
