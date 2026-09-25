@@ -52,7 +52,7 @@ edm2-train \
     --data "${DATA:-./datasets/imagenet_9to4_1024x1024_256x256.zip}" \
     --gpus "${GPUS:-2}" \
     --batch-gpu "${BATCH_GPU:-64}" \
-    --cond True --mirror False \
+    --cond True \
     --tick "${TICK:-128}" --snap "${SNAP:-64}" --snapshot-keep-last "${KEEP_LAST:-1}" \
     --combra-metrics True --num-fid-samples "${NUM_FID_SAMPLES:-10000}" \
     --eval-sampler "${EVAL_SAMPLER:-dpm++}" --eval-sampling-steps "${EVAL_STEPS:-25}" \

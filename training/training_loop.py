@@ -25,23 +25,37 @@ from torch_utils import distributed as dist, misc, persistence, training_stats
 from training import checkpoint as ckpt, logger as tblog, metrics as combra_mod, samplers
 
 #----------------------------------------------------------------------------
-# Delete all but the `keep_last` newest per-tick inference snapshots so the history
-# stays disk-bounded. `keep_last <= 0` keeps everything. Prunes by distinct kimg (a
-# phema run writes one suffixed .pt per EMA std per tick), matching ONLY the
-# `edm2-snapshot-<kimg>[-<std>]-inference.pt` history.
+# Snapshot retention. `select_snapshots` is pure: given every snapshot record so far
+# as (kimg, metrics) it returns the kimgs to keep -- the `keep_last` newest plus the
+# best (lowest) for each of BEST_METRICS -- and {metric: (value, kimg)} for the bests.
+# nan / missing values are skipped and a tie keeps the earlier snapshot, so a best is
+# only ever replaced by a strictly better one and never pruned. `keep_last <= 0`
+# keeps everything. All per-EMA-std files of one kimg count as one snapshot.
 
-def prune_inference_snapshots(run_dir, keep_last):
-    if keep_last <= 0:
-        return
+BEST_METRICS = ('combra_fid', 'combra_fd_dinov2', 'combra_cmmd')
+
+def select_snapshots(records, keep_last):
+    best = {}  # metric -> (value, kimg)
+    for kimg, metrics in records:
+        for key in BEST_METRICS:
+            value = (metrics or {}).get(key)
+            if value is None or not np.isfinite(value):
+                continue
+            if key not in best or value < best[key][0]:
+                best[key] = (float(value), kimg)
+    kimgs = sorted(kimg for kimg, _ in records)
+    keep = set(kimgs if keep_last <= 0 else kimgs[-keep_last:])
+    keep.update(kimg for _, kimg in best.values())
+    return keep, best
+
+# Delete every `edm2-snapshot-<kimg>[-<std>]-inference.pt` whose kimg is not in
+# `keep` (a phema run writes one suffixed .pt per EMA std per snapshot tick).
+
+def prune_inference_snapshots(run_dir, keep):
     kimg_re = re.compile(r'edm2-snapshot-(\d+).*-inference\.pt$')
-    snaps = []
     for path in glob.glob(os.path.join(run_dir, 'edm2-snapshot-*-inference.pt')):
         m = kimg_re.search(os.path.basename(path))
-        if m is not None:
-            snaps.append((int(m.group(1)), path))
-    keep = set(sorted({kimg for kimg, _ in snaps})[-keep_last:])
-    for kimg, path in snaps:
-        if kimg not in keep:
+        if m is not None and int(m.group(1)) not in keep:
             try:
                 os.remove(path)
             except OSError:
@@ -213,12 +227,11 @@ def training_loop(
     seed                = 0,        # Global random seed.
     batch_size          = 2048,     # Total batch size for one training iteration.
     batch_gpu           = None,     # Limit batch size per GPU. None = no limit.
-    mirror              = False,     # Stochastic per-item horizontal flip in the training loader only.
     total_nimg          = 8<<30,    # Train for a total of N training images.
     slice_nimg          = None,     # Train for a maximum of N training images in one invocation. None = no limit.
     status_nimg         = 128<<10,  # Report status every N training images. None = disable.
     snapshot_nimg       = 8<<20,    # Save network snapshot every N training images. None = disable.
-    snapshot_keep_last  = 3,        # Keep only the N newest per-tick inference snapshots (0 = keep all).
+    snapshot_keep_last  = 1,        # Keep the N newest inference snapshots + the best by each of BEST_METRICS (0 = keep all).
 
     loss_scaling        = 1,        # Loss scaling factor for reducing FP16 under/overflows.
     force_finite        = True,     # Get rid of NaN/Inf gradients before feeding them to the optimizer.
@@ -382,6 +395,8 @@ def training_loop(
     stats_metrics = None            # latest combra metrics dict (rank 0)
     stats_row = None                # this tick's stats.jsonl row, written after its eval (rank 0)
     best_fid = float('inf')         # running best combra FID -> Metrics/combra_fid_best
+    snapshot_records = []           # (kimg, combra metrics) per saved snapshot, for retention (rank 0)
+    snapshot_files = {}             # kimg -> file name of the snapshot the metrics scored (rank 0)
     while True:
         done = (state.cur_nimg >= stop_at_nimg)
 
@@ -438,6 +453,7 @@ def training_loop(
         at_snapshot = snapshot_nimg is not None and (
             (state.cur_nimg % snapshot_nimg == 0 and (state.cur_nimg != start_nimg or start_nimg == 0))
             or (done and state.cur_nimg != start_nimg))
+        snapshot_metrics = {}           # this tick's combra metrics, for snapshot retention
         if at_snapshot and (use_combra or rank == 0):
             eval_net = _primary_ema_net(ema, net)
             eval_net.eval()
@@ -449,6 +465,7 @@ def training_loop(
                     sampler=eval_sampler, num_steps=eval_num_steps, guidance=eval_guidance,
                     seed=seed + state.cur_nimg, log_fn=dist.print0)
                 if rank == 0 and stats_metrics:
+                    snapshot_metrics = dict(stats_metrics)
                     eval_sec = time.time() - eval_start
                     if 'combra_fid' in stats_metrics:
                         best_fid = min(best_fid, float(stats_metrics['combra_fid']))
@@ -488,8 +505,11 @@ def training_loop(
             stats_row = None
 
         # Save checkpoints: EMA-only .pt state-dict inference snapshots, one per EMA
-        # std, written atomically and pruned to --snapshot-keep-last (§3). The newest
-        # snapshot is always the final model (last-tick MUST above).
+        # std, written atomically (§3). The metrics evaluated above scored this
+        # snapshot (same cur_nimg, primary EMA = first file), so it competes for best
+        # before anything is pruned: --snapshot-keep-last newest + the best per
+        # BEST_METRICS are kept. The newest snapshot is always the final model
+        # (last-tick MUST above).
         if at_snapshot:
             misc.check_ddp_consistency(net)  # collective: must run on every rank
         if at_snapshot and rank == 0:
@@ -501,7 +521,14 @@ def training_loop(
                     ema_net=ema_net, network_kwargs=full_network_kwargs, encoder_kwargs=encoder_kwargs,
                     class_names=class_names, cur_nimg=state.cur_nimg, resolution=pixel_resolution)
                 dist.print0(f'Saved {fname}')
-            prune_inference_snapshots(run_dir, snapshot_keep_last)
+                snapshot_files.setdefault(state.cur_nimg // 1000, fname)
+            snapshot_records.append((state.cur_nimg // 1000, snapshot_metrics))
+            keep, best = select_snapshots(snapshot_records, snapshot_keep_last)
+            if snapshot_keep_last > 0:
+                prune_inference_snapshots(run_dir, keep)
+            if best:
+                tblog.log('Best snapshots: ' + '  '.join(
+                    f'{k} {best[k][0]:.4f} {snapshot_files[best[k][1]]}' for k in BEST_METRICS if k in best))
 
         # Done?
         if done:
@@ -515,10 +542,6 @@ def training_loop(
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 images, labels = next(dataset_iterator)
                 images = images.to(device)
-                if mirror:
-                    # Loader-level stochastic per-item horizontal flip (training only).
-                    flip = torch.rand(images.shape[0], device=device) < 0.5
-                    images[flip] = images[flip].flip(-1)
                 images = encoder.encode_latents(images)
                 loss = loss_fn(net=ddp, images=images, labels=labels.to(device))
                 training_stats.report('Loss/loss', loss)

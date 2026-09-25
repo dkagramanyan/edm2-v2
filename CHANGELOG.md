@@ -5,6 +5,54 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-25
+
+### Changed
+- **The learning-rate rampup follows the batch size, so the schedule matches the
+  paper in iterations.** The paper (Table 6) and upstream tune the schedule at batch
+  2048: a 10 Mimg rampup (~4.9k iterations) and the decay knee at t_ref = 70k
+  iterations. t_ref was already counted in iterations, but the rampup was counted in
+  images, so at the `sh/` batches 128 / 64 / 32 it lasted 78k / 156k / 312k
+  iterations, ran past the knee, and the peak learning rate reached only
+  0.95 / 0.67 / 0.47 × α_ref (0.0095 / 0.0067 / 0.0038 instead of 0.0100 / 0.0100 /
+  0.0080 with the S presets of the time). The rampup is now 10 Mimg × batch / 2048, so the peak is α_ref at every
+  batch. New `--rampup` (Mimg) overrides it; `--rampup 10` restores the upstream
+  behaviour. α_ref is unchanged: neither the paper nor upstream gives a batch-scaling
+  rule for it.
+- **The `edm2-img1024-*` presets use the paper's values (EDM2 Table 6).** The paper
+  has no 1024 px models, so each preset now takes the img512 values for the same model
+  size: `edm2-img1024-s` α_ref 0.0080 → 0.0100, dropout 0.10 → 0.00, duration
+  1073.7 → 2147.5 Mimg (`2048<<20`); `edm2-img1024-m` α_ref 0.0070 → 0.0090, duration
+  1073.7 → 2147.5 Mimg, dropout 0.10 as before. Channels, t_ref and P_mean / P_std
+  were already the paper's. A test pins each img1024 preset to its img512 twin.
+- **Snapshot retention keeps the best snapshots, not only the newest.**
+  `--snapshot-keep-last N` now keeps the N newest snapshots **plus** the best one by
+  each of `combra_fid`, `combra_fd_dinov2` and `combra_cmmd` (lower is better; nan or
+  missing values are skipped; a tie keeps the earlier snapshot). A best snapshot is
+  only replaced by a strictly better one, so later ticks never prune it; one snapshot
+  may be best for several metrics, so at most N + 3 remain. All per-EMA-std files of
+  one kimg count as one snapshot. Pruning runs after the tick's combra eval has scored
+  the new snapshot (the eval runs before the save at the same `cur_nimg`, so the
+  metrics are that snapshot's). Each snapshot tick logs
+  `Best snapshots: combra_fid <v> <file>  combra_fd_dinov2 <v> <file>  combra_cmmd <v> <file>`.
+  The default drops from 3 to 1 in the CLI and the loop (the `sh/` scripts already
+  used 1); `0` still keeps everything. Same interface as san-v2. Tested by
+  `select_snapshots`, a pure function over `(kimg, metrics)` records, and
+  `prune_inference_snapshots`.
+- **combra pin `v0.17.1` → `v0.18.0`.** FD-DINOv2 now uses DINOv2 ViT-L/14 with the
+  dgm-eval preprocessing, and CMMD L2-normalizes the CLIP embeddings, so
+  `combra_fd_dinov2` and `combra_cmmd` **are not comparable with runs logged under
+  0.17.1 or earlier**. `edm2-download-models` calls combra's `fd_dinov2_features` with
+  its default backbone, so it now prefetches the ViT-L/14 weights (about 1.2 GB). No
+  code change here; the test suite passes against 0.18.0.
+- **README: the upstream-comparison table lists every difference from NVlabs/edm2**
+  and marks each as an improvement, a contract (v2 model-API convention) or an
+  adaptation: bf16 option, TF32 default, on-the-fly VAE encode, LR rampup in
+  iterations, samplers, flip removal, batch from the CLI, presets, `label_dim = 3`,
+  3 loader workers, `InfiniteSampler`, dataset checks, checkpointing and retention,
+  combra eval, refused training-time guidance, logging, generation, packaging and two
+  small compatibility fixes.
+
 ### Fixed
 - **`--guidance` other than 1 is refused.** It was documented as the eval-time
   classifier-free guidance strength, but the loop never has a guiding network
@@ -29,6 +77,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Removed
 - Unused `_combra_gather_pooled_angles` placeholder in `training/metrics.py`.
+- **The horizontal-flip augmentation option.** `edm2-train --mirror` (off by
+  default and off in every `sh/` script), the loop's `mirror` flip, and the dataset's
+  upstream `xflip` option (`Dataset(xflip=…)`, `get_details().xflip`) are gone.
+  Training behaviour with the defaults is unchanged; `--mirror` is now an unknown
+  option.
 
 ## [0.5.0] — 2026-09-25
 

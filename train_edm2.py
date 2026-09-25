@@ -43,9 +43,13 @@ config_presets = {
     'edm2-img64-m':     dnnlib.EasyDict(duration=2048<<20, channels=256, lr=0.0090, decay=35000, dropout=0.10, P_mean=-0.8, P_std=1.6),
     'edm2-img64-l':     dnnlib.EasyDict(duration=1024<<20, channels=320, lr=0.0080, decay=35000, dropout=0.10, P_mean=-0.8, P_std=1.6),
     'edm2-img64-xl':    dnnlib.EasyDict(duration=640<<20,  channels=384, lr=0.0070, decay=35000, dropout=0.10, P_mean=-0.8, P_std=1.6),
-    'edm2-img1024-s':   dnnlib.EasyDict(duration=1024<<20, channels=192, lr=0.0080, decay=70000, dropout=0.10, P_mean=-0.4, P_std=1.0),
-    'edm2-img1024-m':   dnnlib.EasyDict(duration=1024<<20, channels=256, lr=0.0070, decay=70000, dropout=0.10, P_mean=-0.4, P_std=1.0),
+    'edm2-img1024-s':   dnnlib.EasyDict(duration=2048<<20, channels=192, lr=0.0100, decay=70000, dropout=0.00, P_mean=-0.4, P_std=1.0),
+    'edm2-img1024-m':   dnnlib.EasyDict(duration=2048<<20, channels=256, lr=0.0090, decay=70000, dropout=0.10, P_mean=-0.4, P_std=1.0),
 }
+
+# Batch size and learning-rate rampup the paper's presets were tuned at (Table 6).
+PAPER_BATCH = 2048
+PAPER_RAMPUP_MIMG = 10
 
 #----------------------------------------------------------------------------
 # Round an image count to a whole number of batches (>= one batch), so the tick /
@@ -119,18 +123,23 @@ def setup_training_config(cfg='edm2-img512-s', gpus=1, **opts):
     c.network_kwargs = dnnlib.EasyDict(class_name='training.networks_edm2.Precond', model_channels=opts.channels, dropout=opts.dropout,
                                        use_fp16=(precision != 'fp32'), mixed_precision_dtype=precision)
     c.loss_kwargs = dnnlib.EasyDict(class_name='training.training_loop.EDM2Loss', P_mean=opts.P_mean, P_std=opts.P_std)
-    c.lr_kwargs = dnnlib.EasyDict(func_name='training.training_loop.learning_rate_schedule', ref_lr=opts.lr, ref_batches=opts.decay)
+    # The paper's schedule (Table 6: alpha_ref, t_ref, 10 Mimg rampup) is tuned at batch 2048. t_ref is
+    # already counted in batches; the rampup is counted in images, so rescale it to keep the paper's
+    # length in iterations (10 Mimg / 2048 = ~4.9k) at any batch. --rampup (Mimg) overrides.
+    rampup_Mimg = opts.get('rampup', None)
+    if rampup_Mimg is None:
+        rampup_Mimg = PAPER_RAMPUP_MIMG * batch_size / PAPER_BATCH
+    c.lr_kwargs = dnnlib.EasyDict(func_name='training.training_loop.learning_rate_schedule', ref_lr=opts.lr, ref_batches=opts.decay, rampup_Mimg=rampup_Mimg)
 
     # Performance-related options.
     c.loss_scaling = opts.get('ls', 1)
     c.cudnn_benchmark = opts.get('bench', True)
     c.allow_tf32 = opts.get('tf32', True)
-    c.mirror = opts.get('mirror', False)
     c.data_loader_kwargs = dnnlib.EasyDict(class_name='torch.utils.data.DataLoader', pin_memory=True,
                                            num_workers=opts.get('workers', 3), prefetch_factor=2)
 
     # I/O-related options.
-    c.snapshot_keep_last = opts.get('snapshot_keep_last', 3)
+    c.snapshot_keep_last = opts.get('snapshot_keep_last', 1)
     c.seed = opts.get('seed', 0)
 
     # Inline evaluation (combra metrics + eval-time sampler). Guidance needs a guiding
@@ -243,6 +252,7 @@ def _free_port():
 @click.option('--P_std', 'P_std',   help='Noise level standard deviation', metavar='FLOAT',     type=click.FloatRange(min=0, min_open=True), default=None)
 @click.option('--lr',               help='Learning rate max. (alpha_ref)', metavar='FLOAT',     type=click.FloatRange(min=0, min_open=True), default=None)
 @click.option('--decay',            help='Learning rate decay (t_ref)', metavar='BATCHES',      type=click.FloatRange(min=0), default=None)
+@click.option('--rampup',           help='Learning rate rampup; default: 10 x batch/2048, i.e. the paper\'s ~4.9k iterations', metavar='MIMG', type=click.FloatRange(min=0), default=None)
 
 # Batch / precision.
 @click.option('--batch-gpu',        help='Per-GPU batch size', metavar='INT',                   type=click.IntRange(min=1), default=32, show_default=True)
@@ -253,13 +263,12 @@ def _free_port():
 @click.option('--ls',               help='Loss scaling', metavar='FLOAT',                       type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 
 # Data.
-@click.option('--mirror',           help='Stochastic horizontal flip in the training loader', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--workers',          help='DataLoader worker processes', metavar='INT',          type=click.IntRange(min=1), default=3, show_default=True)
 
 # I/O-related options.
 @click.option('--tick',             help='Status/eval tick interval in kimg', metavar='INT',    type=click.IntRange(min=1), default=128, show_default=True)
 @click.option('--snap',             help='Snapshot every N ticks', metavar='INT',               type=click.IntRange(min=1), default=64, show_default=True)
-@click.option('--snapshot-keep-last', 'snapshot_keep_last', help='Keep only the N newest inference snapshots (0 = keep all)', metavar='INT', type=click.IntRange(min=0), default=3, show_default=True)
+@click.option('--snapshot-keep-last', 'snapshot_keep_last', help='Keep the N newest inference snapshots + the best by combra_fid / fd_dinov2 / cmmd (0 = keep all)', metavar='INT', type=click.IntRange(min=0), default=1, show_default=True)
 @click.option('--seed',             help='Random seed', metavar='INT',                          type=int, default=0, show_default=True)
 @click.option('-n', '--dry-run',    help='Print training options and exit',                     is_flag=True)
 
@@ -287,7 +296,8 @@ def main(**opts):
 
     \b
     # Each snapshot tick (and the last tick) writes EMA-only .pt inference snapshots
-    # edm2-snapshot-<kimg>[-<std>]-inference.pt, pruned to --snapshot-keep-last.
+    # edm2-snapshot-<kimg>[-<std>]-inference.pt; --snapshot-keep-last N keeps the N
+    # newest plus the best by combra_fid, combra_fd_dinov2 and combra_cmmd.
     # Runs are not resumable: size --kimg (or split stages) to fit the job's time
     # limit. Every launch allocates a fresh run id.
     """

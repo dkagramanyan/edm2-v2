@@ -17,23 +17,41 @@ https://arxiv.org/abs/2312.02696
 Tero Karras, Miika Aittala, Tuomas Kynkäänniemi, Jaakko Lehtinen, Timo Aila, Samuli Laine<br>
 https://arxiv.org/abs/2406.02507
 
-> **The training math is unchanged.** The EDM2 loss, learning-rate schedule,
-> optimizer step, magnitude-preserving network, preconditioning and Power-Function
-> EMA (the "training dynamics and update layers") are preserved exactly. Everything
-> new below runs *around* that core — at logging, inference and eval time only.
+> **The training math is unchanged.** The EDM2 loss, optimizer step,
+> magnitude-preserving network, preconditioning and Power-Function EMA (the "training
+> dynamics and update layers") are preserved exactly; only the learning-rate rampup
+> length now follows the batch size (see [Learning-rate schedule](#learning-rate-schedule)).
+> Everything else new below runs *around* that core — at logging, inference and eval
+> time only.
 
 ## Differences from upstream NVlabs/edm2
 
-| Area | Upstream edm2 | This refresh |
-|---|---|---|
-| **Logging** | single `Status:` line + `stats.jsonl` | rank-0 `<run>.log`, scalar-only `stats.jsonl`, TensorBoard (`events.out.tfevents.*` with the run name as `filename_suffix`), a `tick … kimg … sec/tick …` console line, plus `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids |
-| **Latent encoding** | dataset pre-encoded to an 8-channel latent zip offline | **inline VAE encode** (DiffiT-style): train latent diffusion straight from a raw-RGB zip, the frozen Stability VAE runs each step — no pre-encode pass. Offline 8-channel latent zips still work and are auto-detected |
-| **Checkpointing** | full resumable `training-state-*.pt` (one per tick) | **EMA-only `.pt` state-dict inference snapshots** `edm2-snapshot-<kimg>[-<std>]-inference.pt`, written atomically each snapshot tick **and always at the last tick**, pruned to `--snapshot-keep-last` (default 3). Every snapshot carries `{n_classes, resolution, class_names, cur_nimg}`. **No resume, no best-model, no rolling latest** — the newest snapshot is the final model |
-| **Metrics** | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**, reference from **raw dataset pixels**: `combra_fid`, `combra_cmmd`, `combra_fd_dinov2` + angle-density metrics |
-| **Generation** | flat `<seed>.png` | per-class HDF5 (`edm2-gen-images --classes … --samples-per-class …`) in the wc_cv angle-pipeline `RankH5Writer` layout, self-spawning `--gpus` (no torchrun) |
-| **Samplers** | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval and generation** |
-| **Packaging / API** | `python train_edm2.py …` | `pip install -e '.[combra]'` + console entry points; pyproject is the only dependency declaration (no `requirements.txt`, no Hydra) |
-| **Resolutions** | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets + `sh/` launch scripts for 256/512/1024 |
+Every difference from [NVlabs/edm2](https://github.com/NVlabs/edm2), marked by kind:
+**improvement** (a deliberate change to how training or sampling behaves),
+**contract** (the v2 model-API convention shared by the four model repos) or
+**adaptation** (needed for this data, hardware or a current software stack).
+
+| Area | Kind | Upstream edm2 | This repo |
+|---|---|---|---|
+| **Precision** | improvement | FP16 mixed precision (`--fp16`) | `--precision fp32/fp16/bf16`; **fp16 stays the default**, bf16 is an option (`Precond(mixed_precision_dtype=…)`) |
+| **TF32** | improvement | TF32 disabled on cuDNN and matmul | **TF32 on by default** (`--tf32 True`, since e661427); `--tf32 False` restores upstream |
+| **Latent encoding** | improvement | dataset pre-encoded to an 8-channel latent zip offline | **on-the-fly StabilityVAE encode** (`StabilityVAEOnTheFlyEncoder`, DiffiT-style): latent diffusion straight from a raw-RGB zip, the frozen VAE runs each step under `no_grad`. Offline 8-channel latent zips still work and are auto-detected. A failed VAE load names the cache dir and the fix |
+| **LR rampup** | improvement | 10 Mimg at any batch (~4.9k iterations at batch 2048) | counted in iterations: 10 Mimg × batch / 2048, so it stays ~4.9k iterations at any batch; `--rampup` overrides (see [Learning-rate schedule](#learning-rate-schedule)) |
+| **Samplers** | improvement | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval and generation** |
+| **Flip augmentation** | improvement | `Dataset(xflip=…)` option (off; not exposed by `train_edm2.py`) | **removed**: no x-flip option anywhere (dataset, loader, loop or CLI) |
+| **Batch size** | adaptation | preset batch 2048 (`--batch`) | from the CLI: `--batch-gpu × --gpus × --grad-accum`; the `sh/` scripts use **128 / 64 / 32** at 256 / 512 / 1024 px (2 GPUs). α_ref and t_ref stay the paper's |
+| **Resolutions / presets** | adaptation | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets with the paper's (Table 6) img512 values for the same model size, + `sh/` launch scripts for 256/512/1024 |
+| **Classes** | adaptation | ImageNet, `label_dim = 1000` | `label_dim` is still inferred from the dataset; the WC-Co zips have 3 classes, so **`label_dim = 3`** |
+| **Loader workers** | adaptation | 2 DataLoader workers | **3** (`--workers`), sized for 8 CPUs / 2 ranks |
+| **InfiniteSampler** | adaptation | `super().__init__(dataset)` + a warning filter | `super().__init__()`: current PyTorch dropped the sampler's `data_source` argument |
+| **Dataset checks** | contract | any channel count; no class names | images must be **3-channel RGB** (asserted on load; `edm2-prepare-data convert` converts grayscale at build time); `dataset.json` carries index-aligned **`class_names`**, and a conditional run on a zip without them is refused. `--max-images` is stratified across classes |
+| **Checkpointing** | contract | resumable `training-state-*.pt` + pickled `network-snapshot-*.pkl` per EMA std | **EMA-only `.pt` state-dict inference snapshots** `edm2-snapshot-<kimg>[-<std>]-inference.pt`, written atomically each snapshot tick **and always at the last tick**, carrying `{n_classes, resolution, class_names, cur_nimg}`. **No resume**: every launch gets a fresh run dir. Retention: `--snapshot-keep-last N` (default 1) newest **plus the best by each of `combra_fid`, `combra_fd_dinov2`, `combra_cmmd`** (never pruned); `0` keeps all |
+| **Metrics** | contract | offline FID / FD-DINOv2 only (`calculate_metrics.py`) | inline **combra** metrics every snapshot tick, **sharded and gathered across all GPU ranks**, reference from **raw dataset pixels**: `combra_fid`, `combra_cmmd`, `combra_fd_dinov2` (DINOv2 ViT-L/14) + angle-density metrics. The offline evaluator is kept |
+| **Training-time guidance** | contract | — (no eval in the loop) | the loop has no guiding network, so `edm2-train --guidance` other than 1 is refused; guidance is applied at generation time (`--gnet --guidance`) |
+| **Logging** | contract | single `Status:` line + `stats.jsonl` | the §7 spec: rank-0 `<run>.log` (one timestamp per line), scalar-only `stats.jsonl` (one row per tick, metrics in the eval tick's row), TensorBoard (`events.out.tfevents.*` with the run name as `filename_suffix`), a `tick … kimg … sec/tick …` console line, `reals.png` / `fakes_init.png` / `fakes<kimg>.png` grids |
+| **Generation** | contract | flat `<seed>.png` from `.pkl` networks | per-class HDF5 (`edm2-gen-images --classes … --samples-per-class …`) in the wc_cv angle-pipeline `RankH5Writer` layout from `.pt` snapshots; `.pkl` loading removed; `reconstruct_phema.py` kept for upstream `.pkl` files only |
+| **Packaging / launch** | contract | `torchrun python train_edm2.py …`, `--preset/--batch/--duration` | `pip install -e '.[combra]'` + console entry points; `--gpus N` self-spawns (no torchrun); `--cfg`/`--kimg`/`--tick`/`--snap`; pyproject is the only dependency declaration |
+| **Small fixes** | adaptation | — | `scipy.linalg.sqrtm` without the removed `disp` argument (`calculate_metrics.py`); the process group is destroyed at exit |
 
 ## Installation
 
@@ -75,6 +93,10 @@ Pre-fetch the VAE and metric backbones for offline nodes:
 ```bash
 edm2-download-models
 ```
+
+This fetches InceptionV3 (FID), CLIP (CMMD) and **DINOv2 ViT-L/14** (FD-DINOv2, combra's
+default since 0.18.0; about 1.2 GB into `$TORCH_HOME/hub`) through combra's own feature
+extractors, so it always caches the backbones combra will use.
 
 The VAE is cached under `~/.cache/dnnlib/diffusers`, **not** the standard
 `~/.cache/huggingface` — `load_stability_vae` overrides `HF_HOME`, so a copy another
@@ -148,6 +170,20 @@ edm2-train --outdir=runs --cfg=edm2-img1024-s \
 continued, and every launch allocates a fresh run id. Size `--kimg` (or split
 resolution stages) so a run fits its job's time limit.
 
+### Learning-rate schedule
+
+The schedule is the paper's Eq. 67 with a linear warm-up:
+α(t) = α_ref · min(t / t_rampup, 1) / √max(t / t_ref, 1), with t in iterations. The
+paper (Table 6) and upstream tune it at batch 2048: α_ref per model size, t_ref = 70k
+iterations (35k for img64) and a 10 Mimg rampup, i.e. ~4.9k iterations. t_ref is
+already counted in iterations; upstream counts the rampup in images, which at this
+repo's batch 128 / 64 / 32 (256 / 512 / 1024 px on 2 GPUs) would stretch it to
+78k / 156k / 312k iterations — past the decay knee — so the peak would never reach
+α_ref (0.95 / 0.67 / 0.47 × α_ref). Here the rampup is 10 Mimg × batch / 2048, which
+keeps both the rampup (~4.9k iterations) and the knee (70k iterations) where the paper
+puts them, and the peak at α_ref. α_ref itself is left at the paper's value: neither
+the paper nor upstream gives a rule for rescaling it with the batch size.
+
 Ready-made launch scripts live in `sh/` — self-locating and offline-cluster ready
 (`HF_HUB_OFFLINE=1`); SLURM specifics are supplied at submission time:
 
@@ -169,11 +205,11 @@ sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 | `--grad-accum` | 1 | Gradient accumulation rounds (total batch = batch-gpu × gpus × grad-accum) |
 | `--precision` | `fp16` | Training precision (`fp32`/`fp16`/`bf16`) |
 | `--tf32` | `True` | Enable TF32 on cuDNN / matmul |
+| `--lr` / `--decay` / `--rampup` | preset / preset / 10 × batch / 2048 | Learning rate max α_ref / decay knee t_ref (iterations) / rampup (Mimg) |
 | `--tick` / `--snap` | 128 / 64 | Status tick interval (kimg) / snapshot every N ticks |
 | `--kimg` | preset | Total training length in kimg |
-| `--mirror` | `False` | Stochastic horizontal flip in the training loader only |
 | `--workers` | 3 | DataLoader worker processes |
-| `--snapshot-keep-last` | 3 | Newest inference snapshots kept (0 = keep all) |
+| `--snapshot-keep-last` | 1 | Newest inference snapshots kept, plus the best by each of `combra_fid` / `combra_fd_dinov2` / `combra_cmmd` (0 = keep all) |
 | `--desc` | — | String appended to the run directory name |
 | `--combra-metrics` | `True` | Inline combra metrics each snapshot tick (all ranks) |
 | `--num-fid-samples` | 10000 | Fakes generated (all ranks) per combra eval; 0 disables |
@@ -194,12 +230,21 @@ runs/00000-edm2-img256-s-gpus2-batch128/
 ├── reals.png                                   # real image grid (raw dataset pixels, class-sorted)
 ├── fakes_init.png                              # pre-training samples
 ├── fakes000200.png …                           # samples per snapshot tick
-└── edm2-snapshot-000200-0.100-inference.pt …   # EMA-only .pt state dicts (one per EMA std), pruned
+└── edm2-snapshot-000200-0.100-inference.pt …   # EMA-only .pt state dicts (one per EMA std), newest + best kept
 ```
 
 Each run gets a **fresh** directory under `--outdir`, named
 `<id:05d>-<cfg>-gpus<N>-batch<B>[-desc]`. The newest snapshot is always the final
 model (a snapshot is written at the last tick regardless of cadence).
+
+Snapshot retention: after each snapshot tick's combra eval has scored the new
+snapshot, `--snapshot-keep-last N` (default 1) newest snapshots are kept plus the best
+one by each of `combra_fid`, `combra_fd_dinov2` and `combra_cmmd` (lower is better;
+nan or missing values are skipped; a tie keeps the earlier one). A best snapshot is
+never pruned by later ticks, one snapshot may be best for several metrics, and all
+per-EMA-std files of one kimg count as one snapshot, so at most N + 3 kimgs remain.
+`0` keeps every snapshot. Each snapshot tick logs one line:
+`Best snapshots: combra_fid <v> <file>  combra_fd_dinov2 <v> <file>  combra_cmmd <v> <file>`.
 
 Monitor with `tensorboard --logdir runs`.
 
@@ -213,7 +258,7 @@ angle extraction is sharded per rank and gathered to rank 0, which computes the
 distances — so the metrics are computed on all GPU ranks, matching DiffiT-v2.
 Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:
 
-- `combra_fid` (InceptionV3 FID), `combra_cmmd` (CLIP-MMD), `combra_fd_dinov2` (DINOv2 Fréchet), `combra_fid_best` (running best), `combra_num_fid_samples` (the count the run used)
+- `combra_fid` (InceptionV3 FID), `combra_cmmd` (CLIP-MMD), `combra_fd_dinov2` (DINOv2 ViT-L/14 Fréchet), `combra_fid_best` (running best), `combra_num_fid_samples` (the count the run used)
 - angle-density metrics: `combra_w1`, `combra_w2`, `combra_circular_w1/w2`, `combra_mu1/mu2`, `combra_sigma1/sigma2`, `combra_pi`
 
 `stats.jsonl` holds one row per tick; on an eval tick the `Metrics/*` keys (and

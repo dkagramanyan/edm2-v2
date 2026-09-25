@@ -30,8 +30,7 @@ class Dataset(torch.utils.data.Dataset):
         name,                   # Name of the dataset.
         raw_shape,              # Shape of the raw image data (NCHW).
         use_labels  = True,     # Enable conditioning labels? False = label dimension is zero.
-        max_size    = None,     # Artificially limit the size of the dataset. None = no limit. Applied before xflip.
-        xflip       = False,    # Artificially double the size of the dataset via x-flips. Applied after max_size.
+        max_size    = None,     # Artificially limit the size of the dataset. None = no limit.
         random_seed = 0,        # Random seed to use when applying max_size.
         cache       = False,    # Cache images in CPU memory?
     ):
@@ -48,12 +47,6 @@ class Dataset(torch.utils.data.Dataset):
         if (max_size is not None) and (self._raw_idx.size > max_size):
             np.random.RandomState(random_seed % (1 << 31)).shuffle(self._raw_idx)
             self._raw_idx = np.sort(self._raw_idx[:max_size])
-
-        # Apply xflip.
-        self._xflip = np.zeros(self._raw_idx.size, dtype=np.uint8)
-        if xflip:
-            self._raw_idx = np.tile(self._raw_idx, 2)
-            self._xflip = np.concatenate([self._xflip, np.ones_like(self._xflip)])
 
     def _get_raw_labels(self):
         if self._raw_labels is None:
@@ -98,9 +91,6 @@ class Dataset(torch.utils.data.Dataset):
                 self._cached_images[raw_idx] = image
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self._raw_shape[1:]
-        if self._xflip[idx]:
-            assert image.ndim == 3 # CHW
-            image = image[:, :, ::-1]
         return image.copy(), self.get_label(idx)
 
     def get_label(self, idx):
@@ -114,7 +104,6 @@ class Dataset(torch.utils.data.Dataset):
     def get_details(self, idx):
         d = dnnlib.EasyDict()
         d.raw_idx = int(self._raw_idx[idx])
-        d.xflip = (int(self._xflip[idx]) != 0)
         d.raw_label = self._get_raw_labels()[d.raw_idx].copy()
         return d
 

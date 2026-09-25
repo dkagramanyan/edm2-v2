@@ -37,7 +37,7 @@ def _all_flags(cmd):
 def test_train_cli_has_v2_flags_and_defaults():
     o = _opts(train_edm2.main)
     for name in ('cfg', 'kimg', 'tick', 'snap', 'batch_gpu', 'grad_accum',
-                 'precision', 'tf32', 'bench', 'mirror', 'workers', 'desc',
+                 'precision', 'tf32', 'bench', 'workers', 'desc',
                  'snapshot_keep_last', 'combra_metrics', 'num_fid_samples', 'combra_ref_count'):
         assert name in o, f'missing --{name}'
     assert o['tick'].default == 128
@@ -47,14 +47,14 @@ def test_train_cli_has_v2_flags_and_defaults():
     assert o['grad_accum'].default == 1
     assert o['batch_gpu'].default == 32
     assert o['workers'].default == 3
-    assert o['snapshot_keep_last'].default == 3
+    assert o['snapshot_keep_last'].default == 1
     assert set(o['precision'].type.choices) == {'fp32', 'fp16', 'bf16'}
 
 
 def test_train_cli_drops_legacy_flags():
     flags = _all_flags(train_edm2.main)
     for dead in ('--preset', '--duration', '--batch', '--status', '--snapshot',
-                 '--fp16', '--save-inference-only'):
+                 '--fp16', '--save-inference-only', '--mirror'):
         assert dead not in flags, f'{dead} should be removed'
     assert '--cfg' in flags
 
@@ -97,6 +97,67 @@ def test_train_refuses_guidance_without_guiding_network(tmp_path):
     assert _train_config(data, guidance=1.0).eval_guidance == 1
     with pytest.raises(click.ClickException, match='guiding network'):
         _train_config(data, guidance=2.0)
+
+
+def test_lr_schedule_matches_paper_in_iterations(tmp_path):
+    # Paper (Table 6): batch 2048, 10 Mimg rampup (~4.9k iterations), decay knee at t_ref = 70k
+    # iterations. Both must stay in iterations at any batch, so the peak LR is alpha_ref.
+    import dnnlib
+    data = _labelled_zip(tmp_path / 'named.zip', ['A', 'B'])
+    for gpus in (1, 16):  # batch 2 and 32
+        c = _train_config(data, gpus=gpus, cfg='edm2-img512-s')
+        batch = c.batch_size
+        # Called exactly as the training loop calls it.
+        lr = lambda it: dnnlib.util.call_func_by_name(cur_nimg=it * batch, batch_size=batch, **c.lr_kwargs)
+        rampup_iters = 10e6 / 2048
+        assert lr(rampup_iters / 2) == pytest.approx(0.0100 / 2)
+        assert lr(rampup_iters) == pytest.approx(0.0100)
+        assert lr(70000) == pytest.approx(0.0100)
+        assert lr(4 * 70000) == pytest.approx(0.0100 / 2)
+    assert _train_config(data, gpus=1, rampup=10).lr_kwargs.rampup_Mimg == 10
+
+
+def test_img1024_presets_match_paper_values():
+    # The paper (Table 6) has no 1024 px models: each img1024 preset takes the paper's
+    # img512 values for the same model size (alpha_ref, dropout, duration, ...).
+    for size in ('s', 'm'):
+        assert train_edm2.config_presets[f'edm2-img1024-{size}'] == train_edm2.config_presets[f'edm2-img512-{size}']
+
+
+def test_snapshot_retention_keeps_newest_and_best_per_metric():
+    from training.training_loop import select_snapshots
+    nan = float('nan')
+    records = [
+        (100, {'combra_fid': 50.0, 'combra_fd_dinov2': 900.0, 'combra_cmmd': 2.0}),
+        (200, {'combra_fid': 30.0, 'combra_fd_dinov2': 950.0, 'combra_cmmd': nan}),
+        (300, {'combra_fid': 40.0, 'combra_fd_dinov2': 800.0, 'combra_cmmd': 3.0}),
+        (400, {}),                                  # eval failed / disabled
+        (500, {'combra_fid': 30.0, 'combra_fd_dinov2': nan}),
+    ]
+    keep, best = select_snapshots(records, keep_last=1)
+    # Tie on fid keeps the earlier 200; nan and missing never win; cmmd best stays at 100.
+    assert {k: kimg for k, (_, kimg) in best.items()} == {'combra_fid': 200, 'combra_fd_dinov2': 300, 'combra_cmmd': 100}
+    assert best['combra_fid'][0] == 30.0
+    assert keep == {100, 200, 300, 500}
+    assert select_snapshots(records, keep_last=2)[0] == {100, 200, 300, 400, 500}
+    assert select_snapshots(records, keep_last=0)[0] == {100, 200, 300, 400, 500}
+    # Bests survive later, worse ticks; one kimg may fill every role.
+    keep, best = select_snapshots(records[:1] + [(k, {'combra_fid': 99.0}) for k in (600, 700)], keep_last=1)
+    assert keep == {100, 700} and {kimg for _, kimg in best.values()} == {100}
+    # Nothing evaluated: only the newest is kept.
+    assert select_snapshots([(100, {}), (200, None)], keep_last=1) == ({200}, {})
+    assert select_snapshots([], keep_last=1) == (set(), {})
+
+
+def test_prune_inference_snapshots_by_kimg(tmp_path):
+    from training.training_loop import prune_inference_snapshots
+    names = ['edm2-snapshot-000100-0.050-inference.pt', 'edm2-snapshot-000100-0.100-inference.pt',
+             'edm2-snapshot-000200-0.050-inference.pt', 'edm2-snapshot-000300-inference.pt',
+             'fakes000200.png']
+    for n in names:
+        (tmp_path / n).touch()
+    prune_inference_snapshots(str(tmp_path), {100, 300})
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(names[:2] + names[3:])
 
 
 def test_gen_cli_contract():
