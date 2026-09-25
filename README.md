@@ -88,20 +88,27 @@ backend. Reuse the env's instead:
 pip install -e . --no-build-isolation
 ```
 
-Pre-fetch the VAE and metric backbones for offline nodes:
+Pre-fetch the VAE and metric backbones for offline nodes (run on a node with internet):
 
 ```bash
-edm2-download-models
+bash download_models.sh                                  # caches under ~/.cache
+MODEL_CACHE=/shared/team/caches bash download_models.sh  # or somewhere else
 ```
 
-This fetches InceptionV3 (FID), CLIP (CMMD) and **DINOv2 ViT-L/14** (FD-DINOv2, combra's
-default since 0.18.0; about 1.2 GB into `$TORCH_HOME/hub`) through combra's own feature
-extractors, so it always caches the backbones combra will use.
+This fetches, with wget/curl + git (no GPU), InceptionV3 (FID) and **DINOv2 ViT-L/14**
+(FD-DINOv2, combra's default since 0.18.0; about 1.2 GB) into `torch/hub`, the CLIP
+ViT-L-14-336 `openai` weights (CMMD) into the HuggingFace hub cache, and — through the
+`hf` / `huggingface-cli` CLI — the Stability VAE `stabilityai/sd-vae-ft-mse`. Without the
+CLI it prints the fallback, `python download_models.py --no-combra` (also installed as
+`edm2-download-models`, which warms the same caches through combra's feature extractors
+and `load_stability_vae`). With `MODEL_CACHE` set, point the jobs at it:
+`TORCH_HOME=$MODEL_CACHE/torch HF_HOME=$MODEL_CACHE/huggingface DNNLIB_CACHE_DIR=$MODEL_CACHE/dnnlib`.
 
-The VAE is cached under `~/.cache/dnnlib/diffusers`, **not** the standard
-`~/.cache/huggingface` — `load_stability_vae` overrides `HF_HOME`, so a copy another
-tool cached is not visible here. Without it, latent presets (`edm2-img256/512/1024-*`)
-cannot run; the RGB `edm2-img64-*` presets need no VAE at all.
+The VAE is cached under `~/.cache/dnnlib/diffusers` (`$DNNLIB_CACHE_DIR/diffusers` when
+that is set), **not** the standard `~/.cache/huggingface` — `load_stability_vae`
+passes that dir as `cache_dir`, so a copy another tool cached is not visible here. Without it,
+latent presets (`edm2-img256/512/1024-*`) cannot run; the RGB `edm2-img64-*` presets
+need no VAE at all.
 
 ## Class conditioning — how the model is made conditional
 
@@ -356,7 +363,8 @@ edm2-v2/
 ├── compare_samplers.py      # optimal-steps analysis (edm2-compare-samplers)
 ├── calculate_metrics.py     # offline FID / FD-DINOv2 (edm2-eval)
 ├── dataset_tool.py          # dataset preparation (edm2-prepare-data)
-├── download_models.py       # prefetch VAE + combra backbones (edm2-download-models)
+├── download_models.sh       # prefetch VAE + combra backbones (bash download_models.sh)
+├── download_models.py       # Python fallback for the VAE (edm2-download-models)
 ├── training/
 │   ├── training_loop.py     # main loop (frozen loss/optimizer/EMA update)
 │   ├── networks_edm2.py     # Precond + magnitude-preserving U-Net (frozen)

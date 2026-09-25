@@ -155,7 +155,10 @@ def load_stability_vae(vae_name='stabilityai/sd-vae-ft-mse', device=torch.device
     cache_dir = dnnlib.make_cache_dir_path('diffusers')
     os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
     os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
-    os.environ['HF_HOME'] = cache_dir
+    # Do not set HF_HOME here: huggingface_hub reads it once, on first import (which is
+    # the diffusers import below), so it would move the hub cache of the whole process
+    # into this dir and open_clip (combra CMMD) would then miss its weights in $HF_HOME.
+    # from_pretrained(cache_dir=...) alone is enough to keep the VAE in the dnnlib cache.
 
     import diffusers  # pip install diffusers # pyright: ignore [reportMissingImports]
     try:
@@ -173,9 +176,10 @@ def load_stability_vae(vae_name='stabilityai/sd-vae-ft-mse', device=torch.device
             raise RuntimeError(
                 f'Could not load the latent VAE {vae_name!r}.\n'
                 f'  Looked in: {cache_dir}\n'
-                f'  Note this is NOT ~/.cache/huggingface -- HF_HOME is overridden above, '
+                f'  Note this is NOT ~/.cache/huggingface -- cache_dir is the dnnlib cache, '
                 f'so a copy cached by another tool is not visible here.\n'
-                f'Fix: run `edm2-download-models` once with network access, or use an '
+                f'Fix: run `bash download_models.sh` (or `edm2-download-models`) once with '
+                f'network access, or use an '
                 f'RGB `edm2-img64-*` preset, which needs no VAE.\n'
                 f'Underlying error: {type(err).__name__}: {err}'
             ) from err

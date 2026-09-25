@@ -5,6 +5,39 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-09-25
+
+### Added
+- **`bash download_models.sh`: model-weight prefetch as in san-v2 and DiffiT.** A shell
+  script at the repo root (wget/curl + git, no GPU) fetches the combra backbones
+  straight into the library caches -- pytorch-fid InceptionV3 and the DINOv2 ViT-L/14
+  weights + `facebookresearch_dinov2_main` repo into `torch/hub`, the CLIP
+  ViT-L-14-336 `openai` weights into the HuggingFace hub cache
+  (`models--timm--vit_large_patch14_clip_336.openai`, where open_clip loads them from)
+  -- and the Stability VAE `stabilityai/sd-vae-ft-mse` (config + safetensors) via
+  `hf download --cache-dir` into the dnnlib cache `load_stability_vae` reads
+  (`$DNNLIB_CACHE_DIR/diffusers`, default `~/.cache/dnnlib/diffusers`). Without the
+  `hf` / `huggingface-cli` CLI it points at `python download_models.py --no-combra`.
+  `MODEL_CACHE=/path` moves every cache off `~/.cache`; the jobs then need
+  `TORCH_HOME=$MODEL_CACHE/torch HF_HOME=$MODEL_CACHE/huggingface
+  DNNLIB_CACHE_DIR=$MODEL_CACHE/dnnlib`.
+
+### Changed
+- `download_models.py` / `edm2-download-models` stay as the Python fallback (as DiffiT
+  keeps `diffit-download-models`). `load_stability_vae`'s missing-VAE error now says
+  to run `bash download_models.sh` first.
+
+### Fixed
+- **Offline CMMD no longer misses CLIP after the VAE is loaded.** `load_stability_vae`
+  set `os.environ['HF_HOME']` to the dnnlib cache before `diffusers` first imported
+  `huggingface_hub`, which reads `HF_HOME` once at import. The latent presets load the
+  VAE before the combra smoke test, so the whole process then looked for the CLIP
+  weights in `~/.cache/dnnlib/diffusers/hub` instead of `$HF_HOME/hub`, and an offline
+  run died at the strict smoke test. (The old `edm2-download-models` only worked
+  because it loaded the VAE first too, so CLIP landed in the dnnlib dir as well.) The
+  override is gone; `from_pretrained(cache_dir=...)` alone keeps the VAE in the dnnlib
+  cache.
+
 ## [0.7.1] — 2026-09-25
 
 ### Changed

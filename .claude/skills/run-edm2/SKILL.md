@@ -109,7 +109,7 @@ python -m pytest tests -q      # 14 CPU tests: sampler contracts + Precond forwa
   encode through the Stability VAE (`stabilityai/sd-vae-ft-mse`). The HF cache
   here is **incomplete** (blobs but no `snapshots/` / `config.json`), so offline
   they die with *"does not appear to have a file named config.json"*. Use
-  `edm2-img64-*` (StandardRGBEncoder) offline; run `edm2-download-models` **with
+  `edm2-img64-*` (StandardRGBEncoder) offline; run `bash download_models.sh` **with
   network** once to enable latent training.
 - **`--max-images N` yields a single-class dataset.** It takes images in
   class-folder-alphabetical order, so a small cap grabs only the first class. The
@@ -130,6 +130,6 @@ python -m pytest tests -q      # 14 CPU tests: sampler contracts + Precond forwa
 | Symptom | Fix |
 |---|---|
 | `pip install -e .` → `Could not find a version that satisfies setuptools>=61` | Add `--no-build-isolation` (offline; setuptools is already in the env). |
-| Train dies at *"Setting up encoder…"* with `config.json` not found | You used a latent preset offline. Switch to `--cfg=edm2-img64-*`, or fetch the VAE online via `edm2-download-models`. |
+| Train dies at *"Setting up encoder…"* with `config.json` not found | You used a latent preset offline. Switch to `--cfg=edm2-img64-*`, or fetch the VAE online via `bash download_models.sh`. |
 | `edm2-*: command not found` | `conda activate edm2` (entry points live in that env's `bin/`). |
 | gen-images: *"index N out of range for a 1-class model"* | Dataset had one class (see `--max-images` gotcha). Retrain on multi-class data or request only `--classes=0`. |

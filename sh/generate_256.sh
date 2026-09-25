@@ -23,7 +23,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV:-edm2-v2}"   # env name = repo name
 # Pure PyTorch: no custom CUDA ops, so no toolkit or arch list is needed.
 # Offline-cluster contract: backbones are prefetched once on a login node
-# (edm2-download-models); compute nodes never reach the network.
+# (bash download_models.sh); compute nodes never reach the network.
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"      # CLIP (CMMD) weights

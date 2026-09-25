@@ -7,7 +7,10 @@
 
 """Pre-download the model weights EDM2 needs for offline nodes: the Stability
 VAE (for latent encode/decode) and combra's image-metric backbones (InceptionV3
-for FID, CLIP for CMMD, DINOv2 for FD-DINOv2). Run once on a networked node."""
+for FID, CLIP for CMMD, DINOv2 for FD-DINOv2). Run once on a networked node.
+
+The primary prefetch is ``bash download_models.sh`` (no Python needed); this is its
+fallback for the VAE when the ``hf`` / ``huggingface-cli`` CLI is not installed."""
 
 import click
 import numpy as np
