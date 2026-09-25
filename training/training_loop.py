@@ -350,6 +350,7 @@ def training_loop(
         # is None on every non-zero rank whether or not anything failed.
         combra_ref, combra_ok = combra_mod.precompute_combra_reference(
             local_ref, device, rank, world_size)
+        del local_ref  # raw pixels are no longer needed (~13.6 GB per rank at 1024 px)
         if not combra_ok:
             use_combra = False
             dist.print0('WARNING: combra reference precompute failed; metrics disabled.')
@@ -476,7 +477,9 @@ def training_loop(
                 if sw is not None:
                     sw.add_image('Fakes', fakes_canvas, global_step=state.cur_nimg, dataformats='HWC')
                     sw.flush()
-                net.train()
+            # Every rank put eval_net in eval mode above; without EMA that is `net`
+            # itself, so train mode must come back on every rank, not just rank 0.
+            net.train()
 
         # One stats.jsonl row per tick, after that tick's eval (§7).
         if stats_row is not None:

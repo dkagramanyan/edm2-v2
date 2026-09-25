@@ -76,6 +76,11 @@ def setup_training_config(cfg='edm2-img512-s', gpus=1, **opts):
         dataset_channels = dataset_obj.num_channels
         if c.dataset_kwargs.use_labels and not dataset_obj.has_labels:
             raise click.ClickException('--cond=True, but no labels found in the dataset')
+        # Label contract (§3/§5): a conditional run needs the zip's class names, or its
+        # snapshots would carry class_names=None and downstream could only guess.
+        if c.dataset_kwargs.use_labels and not dataset_obj.class_names:
+            raise click.ClickException('--cond=True, but the dataset records no class_names; '
+                                       'rebuild it with edm2-prepare-data')
         del dataset_obj # conserve memory
     except IOError as err:
         raise click.ClickException(f'--data: {err}')
@@ -128,7 +133,12 @@ def setup_training_config(cfg='edm2-img512-s', gpus=1, **opts):
     c.snapshot_keep_last = opts.get('snapshot_keep_last', 3)
     c.seed = opts.get('seed', 0)
 
-    # Inline evaluation (combra metrics + eval-time sampler).
+    # Inline evaluation (combra metrics + eval-time sampler). Guidance needs a guiding
+    # network (--gnet in the generate scripts); training has none, and EDM2 trains no
+    # null label for classifier-free guidance, so anything but 1 would be ignored.
+    if opts.get('guidance', 1.0) != 1:
+        raise click.ClickException('--guidance needs a guiding network, which training-time eval does not have; '
+                                   'use --guidance 1 and apply guidance at generation time (--gnet --guidance)')
     c.combra_metrics = opts.get('combra_metrics', True)
     c.num_fid_samples = opts.get('num_fid_samples', 10000)
     c.combra_ref_count = opts.get('combra_ref_count', 0) or None
@@ -259,7 +269,7 @@ def _free_port():
 @click.option('--combra-ref-count', help='Real reference images for combra; 0=whole dataset', metavar='INT', type=int, default=0, show_default=True)
 @click.option('--eval-sampler',     help='Eval-time / snapshot sampler', type=click.Choice(['edm', 'euler', 'ddim', 'dpm++']), default='dpm++', show_default=True)
 @click.option('--eval-sampling-steps', help='Eval-time sampling steps', metavar='INT',          type=click.IntRange(min=1), default=25, show_default=True)
-@click.option('--guidance',         help='Eval-time classifier-free guidance strength', metavar='FLOAT', type=float, default=1.0, show_default=True)
+@click.option('--guidance',         help='Eval-time guidance strength; only 1 (no guidance) is accepted, as training has no --gnet', metavar='FLOAT', type=float, default=1.0, show_default=True)
 
 def main(**opts):
     """Train diffusion models according to the EDM2 recipe from the paper

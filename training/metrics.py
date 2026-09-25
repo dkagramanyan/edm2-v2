@@ -37,7 +37,7 @@ try:
     COMBRA_IMPORT_ERROR = None
 except ImportError as _combra_exc:
     _combra_self_test = _combra_precompute_reference = None
-    _combra_gather_generated = _combra_gather_pooled_angles = None
+    _combra_gather_generated = None
     _combra_distributed_metrics_impl = _combra_all_ranks_ok = None
     HAS_COMBRA = False
     # Keep the reason. "combra is not installed" is the wrong diagnosis when combra
@@ -131,7 +131,9 @@ def generate_fake_shard(net, encoder, gnet, num_samples, batch, device, rank, wo
     encoder.init(device)
     n_local = (int(num_samples) + world_size - 1 - rank) // world_size  # ceil-split
     C, R = net.img_channels, net.img_resolution
-    chunks, got = [], 0
+    # Filled batch by batch into one preallocated uint8 array: at 1024 px a 5k-image
+    # shard is ~16 GB, and concatenating a list of chunks would briefly double that.
+    out, got = None, 0
     while got < n_local:
         b = min(batch, n_local - got)
         draws = [_eval_draw(seed, rank + j * world_size, C, R, net.label_dim)
@@ -143,10 +145,13 @@ def generate_fake_shard(net, encoder, gnet, num_samples, batch, device, rank, wo
             labels = torch.eye(net.label_dim, device=device)[idx]
         latents = sampler_sample(net, noise, labels=labels, gnet=gnet,
                                  sampler=sampler, num_steps=num_steps, guidance=guidance)
-        chunks.append(_decode_to_nhwc_uint8(encoder, latents))
+        px = _decode_to_nhwc_uint8(encoder, latents)
+        if out is None:
+            out = np.empty((n_local,) + px.shape[1:], dtype=np.uint8)
+        out[got:got + b] = px
         got += b
-    if chunks:
-        return np.concatenate(chunks, 0)
+    if out is not None:
+        return out
     return np.zeros((0, 1, 1, 3), dtype=np.uint8)
 
 @torch.inference_mode()
@@ -154,9 +159,19 @@ def compute_combra_metrics(net, encoder, combra_ref, num_samples, batch, device,
                            *, sampler, num_steps, guidance=1, gnet=None, seed=0, log_fn=print):
     """Generate fakes on every rank, extract+gather combra features, and compute the
     ``combra_*`` metrics on rank 0. Returns a metric dict on rank 0, ``None`` else."""
-    local_fakes = generate_fake_shard(net, encoder, gnet, num_samples, batch, device,
-                                       rank, world_size, sampler=sampler,
-                                       num_steps=num_steps, guidance=guidance, seed=seed)
+    # Agree on the shard before gather_generated's collectives (§6): a rank that raised
+    # here would leave the others blocked in the gather until the NCCL watchdog fires.
+    ok = True
+    try:
+        local_fakes = generate_fake_shard(net, encoder, gnet, num_samples, batch, device,
+                                           rank, world_size, sampler=sampler,
+                                           num_steps=num_steps, guidance=guidance, seed=seed)
+    except Exception as e:  # noqa: BLE001 -- reported to every rank below
+        ok = False
+        print(f"[rank {rank}] combra eval shard generation failed: {e}", flush=True)
+    if not _combra_all_ranks_ok(ok, device, world_size):
+        log_fn("combra metrics failed: eval shard generation failed on at least one rank")
+        return {} if rank == 0 else None
     gen_feats, gen_angles = _combra_gather_generated(local_fakes, device, rank, world_size)
     if rank != 0:
         return None

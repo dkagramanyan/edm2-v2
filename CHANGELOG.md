@@ -5,6 +5,31 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **`--guidance` other than 1 is refused.** It was documented as the eval-time
+  classifier-free guidance strength, but the loop never has a guiding network
+  (`gnet=None`), so the samplers ignored it while `training_options.json` recorded it.
+  EDM2 trains no null label, so guidance needs a separate `--gnet`, which only the
+  generate scripts take (as upstream). `edm2-train --guidance 2` now exits with a clear
+  message.
+- **A conditional run on a zip without `class_names` is refused at startup (§3/§5).**
+  Its snapshots stored `class_names=None`. Rebuild the zip with `edm2-prepare-data`.
+- **Train mode is restored on every rank after an eval tick.** Without EMA the eval
+  net is `net` itself, which every rank switched to eval mode while only rank 0
+  switched it back, so dropout was off on the other ranks for the rest of the run.
+  The default phema run was not affected.
+- **A failed eval shard no longer hangs the other ranks (§6).** Fake generation now
+  runs inside a try block and all ranks agree through `all_ranks_ok` before
+  `gather_generated`. A failure on any rank skips that tick's metrics on every rank.
+  The shard is also written into one preallocated uint8 array instead of being
+  concatenated from chunks, which halves peak host memory at 1024 px (about 16 GB per
+  rank for 5k fakes, down from about 31 GB). The raw reference shard (about 13.6 GB
+  per rank at 1024 px with the whole 8640-image set) is freed once its features are
+  extracted, where before it was held for the whole run.
+
+### Removed
+- Unused `_combra_gather_pooled_angles` placeholder in `training/metrics.py`.
+
 ## [0.5.0] — 2026-09-25
 
 ### Changed

@@ -79,6 +79,28 @@ def test_combra_import_guard():
     )
 
 
+def test_eval_shard_failure_is_caught_before_the_gather(monkeypatch):
+    # §6: a rank whose shard generation raises must agree with the others (all_ranks_ok)
+    # instead of leaving them blocked in gather_generated; the tick scores nothing.
+    from training import metrics
+
+    if not metrics.HAS_COMBRA:
+        pytest.skip("combra not installed")
+
+    def boom(*a, **k):
+        raise RuntimeError("CUDA out of memory")
+
+    def no_gather(*a, **k):
+        raise AssertionError("gather_generated reached after a failed shard")
+
+    monkeypatch.setattr(metrics, "generate_fake_shard", boom)
+    monkeypatch.setattr(metrics, "_combra_gather_generated", no_gather)
+    logged = []
+    got = metrics.compute_combra_metrics(None, None, None, 4, 2, "cpu", 0, 1,
+                                         sampler="dpm++", num_steps=2, log_fn=logged.append)
+    assert got == {} and logged
+
+
 def _grain_image(seed, size=96, n=10):
     """A small synthetic microstructure: filled polygons on a light ground.
 

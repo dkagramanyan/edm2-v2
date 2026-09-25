@@ -100,8 +100,9 @@ few composable methods, all available here:
   the denoiser output is extrapolated away from the guiding network's,
   `D = lerp(D_guide, D_main, guidance)`. Use the model's own weaker/earlier
   checkpoint (autoguidance) or an unconditional model as `--gnet`. `--guidance 1`
-  (default) disables guidance. The same `--guidance` is honored during training-time
-  combra eval and by every sampler (`edm/euler/ddim/dpm++`).
+  (default) disables guidance. Every sampler (`edm/euler/ddim/dpm++`) honors it.
+  Training-time combra eval has no guiding network, so `edm2-train` refuses
+  `--guidance` other than 1.
 - **Specific classes.** `edm2-gen-images --classes=<spec> --samples-per-class=N`
   selects which classes to generate — `<spec>` is indices, ranges, or class names
   (`0,1,4-6` or `Ultra_Co11`). The legacy `--seeds` mode takes a single `--class`.
@@ -179,7 +180,7 @@ sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 | `--combra-ref-count` | 0 (whole set) | Real reference images for combra (seeded random subset) |
 | `--eval-sampler` | `dpm++` | Eval-time / snapshot sampler (`edm/euler/ddim/dpm++`) |
 | `--eval-sampling-steps` | 25 | Eval-time sampling steps |
-| `--guidance` | 1 | Eval-time classifier-free guidance strength |
+| `--guidance` | 1 | Eval-time guidance strength; only 1 accepted (training has no `--gnet`) |
 | `-n, --dry-run` | off | Print resolved config and exit |
 
 ### Training output

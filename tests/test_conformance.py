@@ -59,6 +59,46 @@ def test_train_cli_drops_legacy_flags():
     assert '--cfg' in flags
 
 
+def _labelled_zip(path, class_names):
+    import io
+    import json
+    import zipfile
+
+    import PIL.Image
+    meta = {'labels': [[f'{i}.png', i % 2] for i in range(4)]}
+    if class_names is not None:
+        meta['class_names'] = class_names
+    with zipfile.ZipFile(path, 'w') as z:
+        for i in range(4):
+            buf = io.BytesIO()
+            PIL.Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(buf, format='PNG')
+            z.writestr(f'{i}.png', buf.getvalue())
+        z.writestr('dataset.json', json.dumps(meta))
+    return str(path)
+
+
+def _train_config(data, **opts):
+    return train_edm2.setup_training_config(data=data, batch_gpu=2, tick=1, snap=1, **opts)
+
+
+def test_train_refuses_conditional_run_on_nameless_zip(tmp_path):
+    import click
+    named = _labelled_zip(tmp_path / 'named.zip', ['A', 'B'])
+    assert _train_config(named).dataset_kwargs.use_labels
+    nameless = _labelled_zip(tmp_path / 'nameless.zip', None)
+    with pytest.raises(click.ClickException, match='class_names'):
+        _train_config(nameless)
+    assert not _train_config(nameless, cond=False).dataset_kwargs.use_labels
+
+
+def test_train_refuses_guidance_without_guiding_network(tmp_path):
+    import click
+    data = _labelled_zip(tmp_path / 'named.zip', ['A', 'B'])
+    assert _train_config(data, guidance=1.0).eval_guidance == 1
+    with pytest.raises(click.ClickException, match='guiding network'):
+        _train_config(data, guidance=2.0)
+
+
 def test_gen_cli_contract():
     o = _opts(generate_images.cmdline)
     for name in ('classes', 'samples_per_class', 'save_mode', 'gpus', 'batch_gpu'):
