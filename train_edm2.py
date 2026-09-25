@@ -105,6 +105,12 @@ def setup_training_config(cfg='edm2-img512-s', gpus=1, **opts):
     else:
         raise click.ClickException(f'--data: Unsupported channel count {dataset_channels}')
 
+    # Dihedral augmentation (training only) transforms the raw RGB image before the VAE
+    # encode; a pre-encoded latent zip has no raw image to transform.
+    c.augment = opts.get('augment', True)
+    if c.augment and dataset_channels != 3:
+        raise click.ClickException('--augment needs a raw RGB dataset; pass --augment False for a pre-encoded latent zip')
+
     # Batch formula: total = batch_gpu x gpus x grad_accum (§2). Ticks and snapshots
     # are counted in kimg and rounded to whole batches.
     batch_gpu = opts.batch_gpu
@@ -263,6 +269,7 @@ def _free_port():
 @click.option('--ls',               help='Loss scaling', metavar='FLOAT',                       type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 
 # Data.
+@click.option('--augment',          help='Random dihedral transform (rot90 x hflip) per training item', metavar='BOOL', type=bool, default=True, show_default=True)
 @click.option('--workers',          help='DataLoader worker processes', metavar='INT',          type=click.IntRange(min=1), default=3, show_default=True)
 
 # I/O-related options.

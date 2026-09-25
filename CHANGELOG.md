@@ -5,6 +5,36 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-25
+
+### Added
+- **`--augment True/False` (default True): dihedral augmentation on the fly.** Each
+  training item gets a uniformly random element of the dihedral group (rot90 by
+  k ∈ {0,1,2,3} after a horizontal flip with probability 0.5; 8 transforms), applied to
+  the raw uint8 batch before the VAE encode (`training_loop.dihedral_augment`). The
+  draw uses the loop's per-iteration seed `(seed, rank, cur_nimg)`, so runs are
+  reproducible. Only training batches are augmented; eval fakes, the reals / fakes
+  grids and generation are not. Square images are required, and a pre-encoded 8-channel
+  latent zip is refused with `--augment True` (there is no raw image to transform).
+  This brings back an augmentation option after 0.6.0 removed `--mirror`; upstream
+  EDM2 trains without augmentation, so this is an adaptation for the small, isotropic
+  WC-Co dataset. `--augment False` restores 0.6.0 behaviour.
+- **The combra reference matches the augmented distribution.** The loop passes
+  `dihedral=<augment>` to combra's `precompute_reference`, which expands each rank's
+  reference shard to the 8 dihedral transforms of every image before extraction.
+
+### Changed
+- **Training data: 1080 originals instead of 8640 stored orientations.** The `sh/`
+  scripts default `DATA` to `./datasets/imagenet_9to4_orig_<r>x<r>.zip` (1080 crops, 360
+  per class, `class_names` `['Ultra_Co25', 'Ultra_Co11', 'Ultra_Co6_2']`) instead of
+  `imagenet_9to4_1024x1024_<r>x<r>.zip`, which held each crop in all 8 dihedral
+  orientations; `--augment` (default, not passed by the scripts) draws them on the fly.
+  An epoch is now 1080 images; kimg still counts images seen, so `--kimg` / `--tick` /
+  snapshot cadences mean the same amount of training. The combra reference is now the
+  8 × 1080 transforms built by combra rather than the 8640 stored images; the two sets
+  match only if the old zips held exact rot90 / flip copies of these crops.
+- **combra pin `v0.18.0` → `v0.19.0`** for `precompute_reference(..., dihedral=)`.
+
 ## [0.6.0] — 2026-09-25
 
 ### Changed

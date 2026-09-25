@@ -38,7 +38,7 @@ Every difference from [NVlabs/edm2](https://github.com/NVlabs/edm2), marked by k
 | **Latent encoding** | improvement | dataset pre-encoded to an 8-channel latent zip offline | **on-the-fly StabilityVAE encode** (`StabilityVAEOnTheFlyEncoder`, DiffiT-style): latent diffusion straight from a raw-RGB zip, the frozen VAE runs each step under `no_grad`. Offline 8-channel latent zips still work and are auto-detected. A failed VAE load names the cache dir and the fix |
 | **LR rampup** | improvement | 10 Mimg at any batch (~4.9k iterations at batch 2048) | counted in iterations: 10 Mimg × batch / 2048, so it stays ~4.9k iterations at any batch; `--rampup` overrides (see [Learning-rate schedule](#learning-rate-schedule)) |
 | **Samplers** | improvement | EDM 2nd-order Heun only | `dpm++` (DPM-Solver++ 2M, **default**, 25 steps), `edm` (Heun), `euler`, `ddim`, σ-space, **one implementation shared by training-eval and generation** |
-| **Flip augmentation** | improvement | `Dataset(xflip=…)` option (off; not exposed by `train_edm2.py`) | **removed**: no x-flip option anywhere (dataset, loader, loop or CLI) |
+| **Augmentation** | adaptation | none: `Dataset(xflip=…)` option off and not exposed by `train_edm2.py` | **`--augment True`** (default): each training item gets a uniformly random dihedral transform (rot90 × h-flip, 8 in all) on the fly, for a small dataset (1080 crops) whose microstructure has no preferred orientation. The combra reference is expanded to the same 8 orientations. `--augment False` trains without augmentation, as upstream. The x-flip dataset option itself is gone (see [Augmentation](#augmentation)) |
 | **Batch size** | adaptation | preset batch 2048 (`--batch`) | from the CLI: `--batch-gpu × --gpus × --grad-accum`; the `sh/` scripts use **128 / 64 / 32** at 256 / 512 / 1024 px (2 GPUs). α_ref and t_ref stay the paper's |
 | **Resolutions / presets** | adaptation | img64, img512 presets | added `edm2-img256-*` and `edm2-img1024-*` presets with the paper's (Table 6) img512 values for the same model size, + `sh/` launch scripts for 256/512/1024 |
 | **Classes** | adaptation | ImageNet, `label_dim = 1000` | `label_dim` is still inferred from the dataset; the WC-Co zips have 3 classes, so **`label_dim = 3`** |
@@ -141,6 +141,13 @@ edm2-prepare-data convert --source=/data/wc_co --dest=datasets/wc_co_512x512.zip
     --resolution=512x512 --transform=center-crop-dhariwal
 ```
 
+The WC-Co zips used by the `sh/` scripts are
+`imagenet_9to4_orig_<r>x<r>.zip` (r = 256 / 512 / 1024): the **1080 original crops**,
+360 per class, `class_names` `['Ultra_Co25', 'Ultra_Co11', 'Ultra_Co6_2']`. They
+replace the `imagenet_9to4_1024x1024_<r>x<r>.zip` zips, which stored each crop in all
+8 dihedral orientations (8640 images); the orientations are now drawn on the fly
+(`--augment`, see [Augmentation](#augmentation)).
+
 Produce one zip per target resolution (`256x256`, `512x512`, `1024x1024`). Training
 runs latent diffusion straight from the RGB zip — the frozen Stability VAE encodes
 inline each step, no pre-encode pass. An 8-channel pre-encoded latent zip
@@ -192,6 +199,25 @@ bash sh/train_256.sh                                   # workstation
 sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 ```
 
+### Augmentation
+
+`--augment True` (default) applies a random element of the dihedral group to each
+training item: rot90 by k ∈ {0, 1, 2, 3} and a horizontal flip with probability 0.5,
+all 8 transforms equally likely. It acts on the raw uint8 image in the training batch,
+before the VAE encode, so it needs square RGB images (a pre-encoded latent zip needs
+`--augment False`). The draw comes from the per-iteration seed
+(`seed, rank, cur_nimg`), so a run is reproducible. Only training batches are
+augmented: the combra eval fakes, the `reals.png` / `fakes*.png` grids and generation
+never are. The combra reference instead covers all 8 orientations of every reference
+image (`precompute_reference(..., dihedral=True)`, combra ≥ 0.19.0), so it matches the
+distribution training sees. `--augment False` trains on the images as stored and uses
+the plain reference.
+
+An epoch is one pass over the dataset: **1080 images** with the `orig` zips (it was
+8640 with the old 8-orientation zips). kimg counts training images seen, so `--kimg`,
+`--tick` and the eval / snapshot cadence mean the same amount of training as before;
+1 kimg is now ~0.93 epochs instead of ~0.12.
+
 ### Key training options
 
 | Option | Default | Description |
@@ -208,6 +234,7 @@ sbatch --account=<proj> --partition=rocky --gpus=2 sh/train_256.sh   # cluster
 | `--lr` / `--decay` / `--rampup` | preset / preset / 10 × batch / 2048 | Learning rate max α_ref / decay knee t_ref (iterations) / rampup (Mimg) |
 | `--tick` / `--snap` | 128 / 64 | Status tick interval (kimg) / snapshot every N ticks |
 | `--kimg` | preset | Total training length in kimg |
+| `--augment` | `True` | Random dihedral transform (rot90 × h-flip) per training item; `False` = none (see [Augmentation](#augmentation)) |
 | `--workers` | 3 | DataLoader worker processes |
 | `--snapshot-keep-last` | 1 | Newest inference snapshots kept, plus the best by each of `combra_fid` / `combra_fd_dinov2` / `combra_cmmd` (0 = keep all) |
 | `--desc` | — | String appended to the run directory name |
@@ -253,7 +280,8 @@ Monitor with `tensorboard --logdir runs`.
 With `--combra-metrics` on (default), every snapshot tick generates
 `--num-fid-samples` (10k) fakes **on all ranks** with the eval sampler, scored
 against the training set as the real reference — **raw dataset pixels**, never VAE
-round-tripped (`--combra-ref-count` caps it to a seeded random subset). Feature and
+round-tripped (`--combra-ref-count` caps it to a seeded random subset); with
+`--augment True` each reference image enters in all 8 dihedral orientations. Feature and
 angle extraction is sharded per rank and gathered to rank 0, which computes the
 distances — so the metrics are computed on all GPU ranks, matching DiffiT-v2.
 Logged under `Metrics/` in TensorBoard and to `stats.jsonl`:

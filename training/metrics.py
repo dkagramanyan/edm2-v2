@@ -73,8 +73,9 @@ def _decode_to_nhwc_uint8(encoder, latents):
 def load_reference_shard(dataset_obj, count, batch, device, rank, world_size, *, seed=0):
     """Load this rank's shard of the real reference set as **raw** RGB uint8 NHWC.
 
-    Reference images are the raw dataset pixels -- never flip-augmented and never VAE
-    round-tripped (§6), so a VAE quality gap shows up in the metric instead of being
+    Reference images are the raw dataset pixels -- never randomly augmented (with
+    --augment, combra's precompute_reference expands each to its 8 dihedral transforms
+    instead) and never VAE round-tripped (§6), so a VAE quality gap shows up in the metric instead of being
     hidden. When ``count`` caps the reference below the dataset size the subset is a
     **seeded random** draw (never the first N -- dataset zips are class-sorted, so a
     first-N slice is class-biased). The chosen indices are split round-robin across

@@ -94,6 +94,27 @@ def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3
     return lr
 
 #----------------------------------------------------------------------------
+# Training-only dihedral augmentation. Each item gets a uniformly random element of
+# the dihedral group D4 (rot90 by k in {0,1,2,3}, preceded by a horizontal flip with
+# probability 0.5), drawn from torch's global RNG. The loop reseeds that RNG from
+# (seed, rank, cur_nimg) before every iteration, so the draw is deterministic per
+# (seed, iteration, item). Applied to the raw uint8 batch, before VAE encoding.
+
+def dihedral_augment(images):
+    """[N, C, H, W] square batch -> same batch, each item under a random D4 element."""
+    if images.shape[-1] != images.shape[-2]:
+        raise ValueError(f'dihedral augmentation needs square images, got {images.shape[-2]}x{images.shape[-1]}')
+    codes = torch.randint(8, [images.shape[0]]).to(images.device)  # code = 4 * flip + k
+    out = torch.empty_like(images)
+    for code in range(8):
+        mask = (codes == code)
+        x = images[mask]
+        if code >= 4:
+            x = x.flip(-1)
+        out[mask] = torch.rot90(x, code % 4, dims=(-2, -1))
+    return out
+
+#----------------------------------------------------------------------------
 # Helpers for the snapshot image grids and picking the EMA network used for
 # eval-time generation. Inference-only -- never touches the update path.
 
@@ -245,6 +266,7 @@ def training_loop(
     eval_sampler        = 'dpm++',  # Sampler used for eval-time / snapshot generation.
     eval_num_steps      = 25,       # Sampling steps for eval-time / snapshot generation.
     eval_guidance       = 1,        # Classifier-free guidance strength for eval-time generation.
+    augment             = False,    # Random dihedral (D4) transform per training item; the combra reference covers all 8.
 ):
     # Initialize.
     if dist.get_rank() == 0:
@@ -272,6 +294,8 @@ def training_loop(
     dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
     ref_image, ref_label = dataset_obj[0]
     class_names = dataset_obj.class_names
+    if augment and dataset_obj.image_shape[1] != dataset_obj.image_shape[2]:
+        raise ValueError(f'augment needs square images, got {dataset_obj.image_shape[1]}x{dataset_obj.image_shape[2]}')
     dist.print0('Setting up encoder...')
     encoder = dnnlib.util.construct_class_by_name(**encoder_kwargs)
     ref_image = encoder.encode_latents(torch.as_tensor(ref_image).to(device).unsqueeze(0))
@@ -342,7 +366,8 @@ def training_loop(
     combra_ref = None
     if use_combra:
         ref_count = combra_ref_count if combra_ref_count is not None else len(dataset_obj)
-        dist.print0(f'Precomputing combra reference from {min(ref_count, len(dataset_obj))} raw images...')
+        dist.print0(f'Precomputing combra reference from {min(ref_count, len(dataset_obj))} raw images'
+                    f'{" x 8 dihedral transforms" if augment else ""}...')
         local_ref = combra_mod.load_reference_shard(dataset_obj, ref_count, batch_gpu, device, rank, world_size, seed=seed)
         smoke_ok = True
         if rank == 0:
@@ -361,8 +386,10 @@ def training_loop(
                 'Refusing to burn a training run producing no metrics.')
         # (reference, ok): ok is rank-uniform, so gating on it is safe -- `combra_ref`
         # is None on every non-zero rank whether or not anything failed.
+        # dihedral=augment: with augmentation on, training sees every image in all 8
+        # dihedral orientations, so the reference expands each image to the same 8.
         combra_ref, combra_ok = combra_mod.precompute_combra_reference(
-            local_ref, device, rank, world_size)
+            local_ref, device, rank, world_size, dihedral=augment)
         del local_ref  # raw pixels are no longer needed (~13.6 GB per rank at 1024 px)
         if not combra_ok:
             use_combra = False
@@ -542,6 +569,8 @@ def training_loop(
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 images, labels = next(dataset_iterator)
                 images = images.to(device)
+                if augment:
+                    images = dihedral_augment(images)
                 images = encoder.encode_latents(images)
                 loss = loss_fn(net=ddp, images=images, labels=labels.to(device))
                 training_stats.report('Loss/loss', loss)

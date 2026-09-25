@@ -46,10 +46,14 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export PYTHONUNBUFFERED=1
 
 # --- One console-command call ------------------------------------------------
+# DATA: the 1080 original crops (360 per class). --augment is left at its default
+# (True): training draws a random dihedral transform (rot90 x hflip) per item on the
+# fly, replacing the old zips that stored all 8 orientations (8640 images). An epoch
+# is therefore 1080 images.
 edm2-train \
     --outdir "${OUTDIR:-./runs}" \
     --cfg "${CFG:-edm2-img512-s}" \
-    --data "${DATA:-./datasets/imagenet_9to4_1024x1024_512x512.zip}" \
+    --data "${DATA:-./datasets/imagenet_9to4_orig_512x512.zip}" \
     --gpus "${GPUS:-2}" \
     --batch-gpu "${BATCH_GPU:-32}" \
     --cond True \
